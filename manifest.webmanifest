@@ -1,24 +1,14 @@
 {
-  "name": "FUNiño Matchday",
-  "short_name": "FUNiño",
-  "description": "Offline Match Tracker für FUNiño-Turniere mit sieben Spielen, Torschützen und Feldwechseln.",
+  "name": "Matchday – FUNiño & Hallenturnier",
+  "short_name": "Matchday",
+  "description": "FUNiño- und Hallen-Fußballturniere dokumentieren: Ergebnisse, Gruppen, Finale, Torschützen, Offline-Modus.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#071b20",
   "theme_color": "#091e24",
   "icons": [
-    {
-      "src": "./icons/icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "./icons/icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any maskable"
-    }
+    {"src":"./icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
+    {"src":"./icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
   ]
 }
