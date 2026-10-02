@@ -72,3 +72,15 @@ Die Import-Vorschau ist vor dem Übernehmen sichtbar. Das Laden ersetzt die vorh
 ## Lokal testen
 
 `python3 -m http.server 8000` im Ordner starten und `http://localhost:8000` aufrufen. App-/Serviceworker-Installation braucht HTTPS oder localhost.
+
+
+## v4 – Hallenturnier für alle Trainer
+
+- Zwei große Hauptbereiche: **Turnierdaten** und **Live-Match**.
+- Turnierliste beginnt bei einer Neuinstallation leer; Turniere lassen sich erstellen, bearbeiten und löschen.
+- Die 13 Beispieltermine 2026/27 können bei Bedarf freiwillig übernommen werden.
+- Einrichtungsablauf: Turnier wählen → Team/Kader → Spielplan anlegen/importieren → Live-Match.
+- Schnellstart eines eigenen Spiels ohne Gruppenplan über Live-Match → Gegner eingeben.
+- Bestehende v3-Hallenergebnisse werden aus `matchday_hall_v3` übernommen; bei der Migration werden nur tatsächlich gespeicherte Turniere sichtbar.
+- Die Turnierliste und JSON-Sicherung enthalten alle selbst angelegten Turniere.
+- Löschen eines Turniers entfernt dessen Matchdaten **nur auf diesem Gerät**; vorab Sicherung exportieren.
