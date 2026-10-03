@@ -36,7 +36,7 @@ migrateLegacy();
 for(const k of Object.keys(app.events)){const e=app.events[k];if(e&&typeof e==='object'){e.running=false;e.startedAt=null;}}
 let event=()=>app.events[app.active]??(app.events[app.active]=freshEvent());
 function matchDuration(e=event()){const x=Number(e?.duration);return Number.isInteger(x)&&x>=1&&x<=90?x:Math.max(1,Math.min(90,Math.round(Number(app.duration)||10)));}
-let view='plan',mainView='data',editingEventId=null,pendingImport=null,pendingImage=null,lastTick=Date.now();
+let view='plan',mainView='data',editingEventId=null,pendingImport=null,pendingImage=null,importMetaSelection=false,lastTick=Date.now();
 function save(){try{localStorage.setItem(KEY,JSON.stringify(app));}catch{}};
 function label(ev){const d=String(ev.date||'').split('-');return d.length===3?`${d[2]}.${d[1]}.${d[0]}`:'Ohne Datum';}
 function setMessage(msg){$('importPreview').textContent=msg;}
@@ -119,12 +119,117 @@ const other=e.fixtures.filter(f=>f.stage!=='group');const fs=[];for(const group 
 async function createKO(){const ts=teamsForKO();let teams=ts;if(ts&&[...event().fixtures].some(f=>f.stage==='group'&&!scoreReady(f))&&!await appConfirm('Nicht alle Gruppenspiele haben Ergebnisse. Die Halbfinalpaarungen basieren auf dem momentanen Tabellenstand. Trotzdem fortfahren?','Finalrunde erstellen','Trotzdem fortfahren'))return;if(!teams){const all=unique([...event().groups.A,...event().groups.B,...event().fixtures.flatMap(f=>[f.home,f.away])]);if(all.length<4){await appAlert('Bitte mindestens 4 Mannschaften anlegen.','Finalrunde erstellen');return;}const input=await appPrompt({title:'Halbfinalteams festlegen',message:'Vier Halbfinalteams mit Semikolon getrennt eingeben. Beispiel: Team 1; Team 2; Team 3; Team 4',defaultValue:all.slice(0,4).join('; '),placeholder:'Team 1; Team 2; Team 3; Team 4'});if(input===null)return;teams=input.split(';').map(clean);if(teams.length!==4||teams.some(x=>!x)||new Set(teams).size!==4){await appAlert('Genau vier verschiedene Teams angeben.','Finalrunde erstellen');return;}}
 if(event().ko.length&&!await appConfirm('Vorhandene K.-o.-Ergebnisse ersetzen?','Finalrunde erstellen','Ersetzen'))return;event().ko=[match(teams[0],teams[1],'','semi'),match(teams[2],teams[3],'','semi'),match('','','','final')];event().running=false;event().liveId=null;render();}
 async function addFixture(){const values=await appForm({title:'Begegnung anlegen',message:'Neue Begegnung oder freies Match erfassen.',fields:[{name:'group',label:'Gruppe',type:'select',value:'A',options:[{label:'Gruppe A',value:'A'},{label:'Gruppe B',value:'B'},{label:'Freies Spiel',value:'F'}]},{name:'home',label:'Heimmannschaft',value:''},{name:'away',label:'Gastmannschaft',value:''},{name:'time',label:'Uhrzeit (optional)',value:'',placeholder:'z. B. 10:30'},{name:'field',label:'Spielfeld (optional)',value:'',placeholder:'z. B. Feld 2'}],okLabel:'Begegnung speichern'});if(values===null)return;const g=String(values.group).trim().toUpperCase();if(!['A','B','F'].includes(g)){await appAlert('A, B oder F verwenden.','Begegnung anlegen');return;}const home=clean(values.home??'');const away=clean(values.away??'');if(!home||!away||home===away){await appAlert('Bitte zwei unterschiedliche Teams eingeben.','Begegnung anlegen');return;}const time=clean(values.time??'');const field=clean(values.field??'');const f=match(home,away,g==='F'?'':g,g==='F'?'friendly':'group',time,field);event().fixtures.push(f);if(g!=='F'){for(const n of [home,away])if(!event().groups[g].includes(n))event().groups[g].push(n);}render();}
+// Geometry-based import for MeinTurnierplan's selectable-text PDF exports.
+// Each item carries the PDF text and its PDF.js text transform coordinates.
+function parseTournamentPdfPages(pages){
+ const groups={A:[],B:[]},fixtures=[],messages=[];
+ const linesFor=records=>{
+  const lines=[];
+  for(const raw of records){
+   const text=String(raw.text||'').trim();if(!text)continue;
+   const item={text,x:Number(raw.x)||0,y:Number(raw.y)||0};
+   let line=lines.find(l=>Math.abs(l.y-item.y)<=2.3);
+   if(!line){line={y:item.y,items:[]};lines.push(line);}
+   line.items.push(item);
+  }
+  return lines.sort((a,b)=>b.y-a.y).map(l=>({y:l.y,items:l.items.sort((a,b)=>a.x-b.x),text:l.items.map(i=>i.text).join(' ').replace(/\s+/g,' ').trim()}));
+ };
+ const pagesLines=pages.map(linesFor);
+ const first=pagesLines[0]||[];
+ const dateRow=first.find(l=>/\bDatum\s*:/i.test(l.text))?.text||'';
+ const durationRow=first.find(l=>/\bSpieldauer\s*:/i.test(l.text))?.text||'';
+ const venueRow=first.find(l=>/\bVeranstaltungsort\s*:/i.test(l.text))?.text||'';
+ const organizerRow=first.find(l=>/\bVeranstalter\s*:/i.test(l.text))?.text||'';
+ const dm=dateRow.match(/\b(\d{2})\.(\d{2})\.(\d{4})\b/);
+ const date=dm?`${dm[3]}-${dm[2]}-${dm[1]}`:'';
+ const durationMatch=durationRow.match(/Spieldauer\s*:\s*(\d{1,2})\s*Minuten/i);
+ const duration=durationMatch?Number(durationMatch[1]):null;
+ const organizer=organizerRow.replace(/^.*?Veranstalter\s*:\s*/i,'').trim();
+ const venue=venueRow.replace(/^.*?Veranstaltungsort\s*:\s*/i,'').trim();
+ const titleRows=first.filter(l=>l.y>first.find(v=>/^Veranstalter\s*:/i.test(v.text))?.y).map(l=>l.text).filter(t=>t&&!/(?:Powered|MeinTurnierplan|Ergebnisse live|Veranstalter|TuS Holzkirchen FC)/i.test(t));
+ const title=titleRows.slice(0,2).join(' ').trim().slice(0,90);
+ // In a MeinTurnierplan PDF the participant table has two parallel lists,
+ // preceded by two distinct "Gruppe" column headings. Limit extraction
+ // to that region; ranking tables elsewhere must never become team lists.
+ for(const lines of pagesLines){
+  const groupHeadIndex=lines.findIndex(l=>l.items.some(i=>/^Gruppe\s+A$/i.test(i.text))&&l.items.some(i=>/^Gruppe\s+B$/i.test(i.text)));
+  if(groupHeadIndex<0)continue;
+  const headings=lines[groupHeadIndex].items;
+  const aHead=headings.find(i=>/^Gruppe\s+A$/i.test(i.text));
+  const bHead=headings.find(i=>/^Gruppe\s+B$/i.test(i.text));
+  const boundary=(aHead.x+bHead.x)/2;
+  for(let i=groupHeadIndex+1;i<lines.length;i++){
+   const line=lines[i];
+   if(line.items.some(item=>/^Nr\.?$/i.test(item.text))||line.items.some(item=>/^Beginn$/i.test(item.text)))break;
+   for(const g of ['A','B']){
+    const text=line.items.filter(item=>g==='A'?item.x<boundary:item.x>=boundary).map(item=>item.text).join(' ').trim();
+    const m=text.match(/^\s*\d{1,2}\s+(.+)$/);
+    if(!m)continue;
+    const team=clean(m[1]);
+    if(team&&/\p{L}/u.test(team)&&!/^Gruppe\b/i.test(team))groups[g].push(team);
+   }
+  }
+ }
+ groups.A=unique(groups.A);groups.B=unique(groups.B);
+ let seenRows=0;
+ for(const lines of pagesLines){
+  for(const row of lines){
+   const items=row.items;
+   const timeIndex=items.findIndex(i=>/^\d{1,2}:\d{2}$/.test(i.text));
+   if(timeIndex<0)continue;
+   const time=items[timeIndex];
+   const numberItems=items.slice(0,timeIndex).filter(i=>/^\d{1,3}$/.test(i.text));
+   if(numberItems.length<2)continue;
+   const number=Number(numberItems[0].text),pitch=Number(numberItems[1].text);
+   const gIndex=items.findIndex((item,i)=>i>timeIndex&&item.x>time.x&&/^[AB]$/i.test(item.text));
+   if(gIndex<0)continue;
+   const gr=items[gIndex],group=gr.text.toUpperCase();
+   const score=items.find((item,i)=>i>gIndex&&item.x>gr.x+80&&/^\s*(?:\d{1,2}\s*)?:\s*(?:\d{1,2})?\s*$/.test(item.text));
+   // The score column is two team-columns to the right of "Gr".
+   // Midpoint between Gr and score divides the home/away names.
+   const scoreX=score?.x??gr.x+215;
+   const awayStart=(gr.x+scoreX)/2;
+   const names=items.filter((item,i)=>i>gIndex&&item.x>gr.x+6&&item.x<scoreX-2);
+   const home=clean(names.filter(i=>i.x<awayStart).map(i=>i.text).join(' '));
+   const away=clean(names.filter(i=>i.x>=awayStart).map(i=>i.text).join(' '));
+   if(!Number.isInteger(number)||number<1||number>999||!Number.isInteger(pitch)||pitch<1||pitch>40)continue;
+   seenRows++;
+   if(!home||!away||home===away||!/\p{L}/u.test(home)||!/\p{L}/u.test(away)){
+    messages.push(`Spiel ${number}: Mannschaften konnten nicht getrennt gelesen werden.`);continue;
+   }
+   if(groups[group].length&&(!groups[group].includes(home)||!groups[group].includes(away))){
+    messages.push(`Spiel ${number}: Begegnung passt nicht zur erkannten Gruppe ${group}.`);continue;
+   }
+   const f=match(home,away,group,'group',time.text,`Feld ${pitch}`);
+   f.sourceNo=number;
+   fixtures.push(f);
+  }
+ }
+ fixtures.sort((a,b)=>(a.sourceNo||0)-(b.sourceNo||0));
+ if(!groups.A.length&&!groups.B.length&&fixtures.length){for(const f of fixtures){groups[f.group].push(f.home,f.away);}groups.A=unique(groups.A);groups.B=unique(groups.B);}
+ if(!fixtures.length&&!groups.A.length&&!groups.B.length)throw Error('In diesem PDF wurden weder eine lesbare Teilnehmerliste noch gültige Spielpaarungen gefunden. Bitte einen offiziellen Text-PDF-Spielplan verwenden.');
+ if(seenRows!==fixtures.length)messages.push(`${seenRows-fixtures.length} mögliche Begegnungen konnten nicht sicher übernommen werden.`);
+ if(fixtures.length>0){const numbers=fixtures.map(f=>f.sourceNo);const missing=[];for(let n=numbers[0];n<=numbers.at(-1);n++){if(!numbers.includes(n))missing.push(n);}if(missing.length)messages.push(`Fehlende Spielnummern: ${missing.slice(0,12).join(', ')}${missing.length>12?' …':''}`);}
+ return {groups,fixtures,meta:{kind:'pdf-structured',title,date,organizer,venue,duration,seenRows,notes:messages,pages:pages.length}};
+}
+
 function parseCSV(src){const lines=String(src).replace(/^\ufeff/,'').split(/\r?\n/).filter(x=>x.trim());if(!lines.length)throw Error('Datei leer');const head=lines[0];const sep=[';',',','\t'].sort((a,b)=>(head.split(b).length-head.split(a).length))[0];function parseRow(row){const res=[];let cur='',quoted=false;for(let i=0;i<row.length;i++){const c=row[i];if(c==='"'){if(quoted&&row[i+1]==='"'){cur+='"';i++;}else quoted=!quoted;}else if(c===sep&&!quoted){res.push(cur.trim());cur='';}else cur+=c;}res.push(cur.trim());return res;}
 const headers=parseRow(lines[0]).map(x=>x.toLowerCase().replace(/[ _\-]/g,''));const field=(names)=>headers.findIndex(h=>names.includes(h));let gi=field(['gruppe','group','pool']),ti=field(['mannschaft','team','verein']),hi=field(['heim','home','team1','heimmannschaft']),ai=field(['gast','away','team2','gastmannschaft']),time=field(['uhrzeit','zeit','time','anpfiff']),pitch=field(['feld','court','field','spielfeld']);const groupRows={A:[],B:[]},fs=[];
 if(hi<0||ai<0){if(ti<0)throw Error('CSV benötigt „Gruppe;Mannschaft“ oder „Gruppe;Heim;Gast“ als Spalten.');}
 for(let i=1;i<lines.length;i++){const cells=parseRow(lines[i]);const g=(gi<0?'A':clean(cells[gi]).replace(/^gruppe\s*/i,'').toUpperCase());if(!['A','B'].includes(g))continue;if(hi>=0&&ai>=0){const home=clean(cells[hi]),away=clean(cells[ai]);if(!home||!away||home===away)continue;fs.push(match(home,away,g,'group',time<0?'':clean(cells[time]),pitch<0?'':clean(cells[pitch])));groupRows[g].push(home,away);}else{const n=clean(cells[ti]);if(n)groupRows[g].push(n);}}
 return {groups:{A:unique(groupRows.A),B:unique(groupRows.B)},fixtures:fs};}
-function parseJSON(s){const obj=JSON.parse(s);if(!obj||typeof obj!=='object'||!obj.groups)throw Error('JSON benötigt „groups“ und optional „fixtures“.');const groups={A:unique(obj.groups.A||[]),B:unique(obj.groups.B||[])};const fixtures=(obj.fixtures||[]).map(f=>match(clean(f.home),clean(f.away),['A','B'].includes(f.group)?f.group:'A','group',clean(f.time),clean(f.field))).filter(f=>f.home&&f.away&&f.home!==f.away);return {groups,fixtures};}
+function parseJSON(s){
+ const obj=JSON.parse(s);
+ if(!obj||typeof obj!=='object'||!obj.groups)throw Error('JSON benötigt „groups“ und optional „fixtures“.');
+ const groups={A:unique(obj.groups.A||[]),B:unique(obj.groups.B||[])};
+ const fixtures=(obj.fixtures||[]).slice(0,500).map(f=>{
+  const gr=['A','B'].includes(f.group)?f.group:'A';
+  const m=match(clean(f.home),clean(f.away),gr,'group',clean(f.time),clean(f.field));
+  if(Number.isInteger(Number(f.sourceNo))&&Number(f.sourceNo)>0)m.sourceNo=Number(f.sourceNo);
+  return m;
+ }).filter(f=>f.home&&f.away&&f.home!==f.away);
+ return {groups,fixtures,meta:obj.meta&&typeof obj.meta==='object'?{...obj.meta,kind:'pdf-structured'}:null};
+}
 // Only rows inside identified group tables are considered team names when processing OCR.
 // Ordinary text under explicit "Gruppe A/B" headings is also supported for manual input.
 function parsePhotoText(input){
@@ -167,23 +272,68 @@ function parsePhotoText(input){
 function preview(parsed,source){
  pendingImport=parsed;
  const total=(parsed.groups.A||[]).length+(parsed.groups.B||[]).length;
- $('applyPreview').disabled=!total&&!parsed.fixtures.length;
+ const count=parsed.fixtures?.length||0;
+ $('applyPreview').disabled=!total&&!count;
+ const isPDF=parsed.meta?.kind==='pdf-structured';
  const status=parsed.meta?.kind==='ocr'?'<p class="hint">Fotoerkennung: Bitte jeden Teamnamen kontrollieren. Es werden keine Spielpaarungen aus einem Tabellenfoto erfunden.</p>':'';
  const groupsHTML=['A','B'].map(group=>{
   const teams=parsed.groups[group]||[];
   if(!teams.length)return '';
   return `<div class="import-group"><h3>Gruppe ${group} · ${teams.length} Teams</h3>${teams.map((team,i)=>`<div class="import-team-row"><input aria-label="Team ${i+1} in Gruppe ${group}" data-team-group="${group}" data-team-index="${i}" value="${escapeHTML(team)}" maxlength="90"/><button class="btn danger" type="button" data-remove-team="${group}:${i}" aria-label="${escapeHTML(team)} entfernen">✕</button></div>`).join('')}</div>`;
  }).join('');
- const fixt=parsed.fixtures.length?`<p class="hint">${parsed.fixtures.length} importierte Spielpaarungen. Die Begegnungen werden erst beim Übernehmen gespeichert.</p>`:'<p class="hint">0 Paarungen erkannt. Gruppenteams allein ergeben noch keinen offiziellen Spielplan.</p>';
- $('importPreview').innerHTML=`<strong>${escapeHTML(source)} · ${total} Teams</strong>${status}${groupsHTML}${fixt}<p class="hint">Bei Fehlern Namen direkt oben ändern oder mit ✕ entfernen. Danach „Geprüfte Daten übernehmen“.</p>`;
+ const meta=parsed.meta||{};
+ const metaFields=[meta.title,meta.date?meta.date.split('-').reverse().join('.'):null,meta.duration?meta.duration+' Minuten':null].filter(Boolean);
+ const metaHTML=isPDF?`<div class="import-summary"><strong>📄 Offizieller PDF-Spielplan erkannt</strong><div>${escapeHTML(metaFields.join(' · '))}</div><div>${parsed.groups.A.length} Teams in Gruppe A · ${parsed.groups.B.length} Teams in Gruppe B · ${count} Begegnungen</div><label class="import-metadata-option"><input id="importMetadata" type="checkbox" ${importMetaSelection?'checked':''}/> <span>Auch Turniername, Datum, Ort und Spielzeit aus dem PDF übernehmen</span></label><p class="hint">Standardmäßig bleiben deine vorhandenen Turnierdaten unverändert. Aktiviere die Option nur, wenn das PDF zum ausgewählten Turnier gehört.</p></div>`:'';
+ const warnings=(meta.notes||[]).length?`<div class="import-warning">⚠️ ${escapeHTML(meta.notes.join(' · '))}. Bitte die fehlenden Spiele manuell ergänzen.</div>`:'';
+ const matches=count?`<details class="import-fixtures"><summary>📋 Alle ${count} erkannten Begegnungen prüfen</summary><div class="import-fixture-list">${parsed.fixtures.map((f,i)=>`<div class="import-fixture"><span class="import-fixture-meta">#${f.sourceNo||i+1} · ${escapeHTML(f.time||'Zeit offen')} · ${escapeHTML(f.field||'Feld offen')} · Gr. ${escapeHTML(f.group||'–')}</span><span>${escapeHTML(f.home)} <b>–</b> ${escapeHTML(f.away)}</span></div>`).join('')}</div></details>`:'<p class="hint">0 Paarungen erkannt. Gruppenteams allein ergeben noch keinen offiziellen Spielplan.</p>';
+ $('importPreview').innerHTML=`<strong>${escapeHTML(source)} · ${total} Teams</strong>${status}${metaHTML}${warnings}${groupsHTML}${matches}<p class="hint">Erkannte Teams bitte prüfen. Bei Tippfehlern Namen oben ändern; Änderungen werden für die betroffenen Paarungen mitübernommen. Danach „Geprüfte Daten übernehmen“.</p>`;
+ const checkbox=$('importMetadata');if(checkbox)checkbox.onchange=e=>{importMetaSelection=e.target.checked;};
 }
-function updateImportTeam(e){if(!pendingImport)return;const input=e.target.closest('[data-team-group]');if(input){const group=input.dataset.teamGroup,idx=Number(input.dataset.teamIndex);if((pendingImport.groups[group]||[])[idx]!==undefined)pendingImport.groups[group][idx]=clean(input.value);return;}const b=e.target.closest('[data-remove-team]');if(!b)return;const [group,idx]=b.dataset.removeTeam.split(':');pendingImport.groups[group].splice(Number(idx),1);preview(pendingImport,'Bearbeitete Vorschau');}
-async function applyImport(){if(!pendingImport)return;pendingImport.groups={A:unique(pendingImport.groups.A||[]),B:unique(pendingImport.groups.B||[])};const rows=[...pendingImport.groups.A,...pendingImport.groups.B];if(!rows.length&&!pendingImport.fixtures.length){await appAlert('Bitte mindestens ein plausibles Team oder eine Begegnung erfassen.','Import prüfen');return;}if(new Set(rows.map(v=>v.toLocaleLowerCase('de'))).size!==rows.length){await appAlert('Teamnamen dürfen nicht doppelt oder in beiden Gruppen vorkommen.','Import prüfen');return;}if((event().fixtures.length||event().ko.length)&&!await appConfirm('Gruppen und Gruppenspielplan ersetzen? Vorhandene Gruppenergebnisse werden gelöscht, die Finalrunde bleibt bestehen.','Import übernehmen','Ersetzen'))return;event().groups={...pendingImport.groups};event().fixtures=pendingImport.fixtures;$('groupA').value=event().groups.A.join('\n');$('groupB').value=event().groups.B.join('\n');event().liveId=null;event().running=false;pendingImport=null;$('applyPreview').disabled=true;closeImportSheet();render();showTab('groups');}
-async function recognize(){if(!pendingImage){$('ocrStatus').textContent='Bitte zuerst ein Bild auswählen.';return;}$('readPhoto').disabled=true;$('ocrStatus').textContent='OCR wird geladen – Internetverbindung erforderlich …';try{if(!window.Tesseract){await new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';s.onload=resolve;s.onerror=()=>reject(Error('OCR-Bibliothek nicht geladen'));document.head.append(s);});}const worker=await Tesseract.createWorker('deu+eng',1,{logger:m=>{if(m.status==='recognizing text')$('ocrStatus').textContent=`Lese Bild: ${Math.round(m.progress*100)} %`;}});try{const result=await worker.recognize(pendingImage);$('rawImport').value=result.data.text;try{const parsed=parsePhotoText(result.data.text);$('ocrStatus').textContent=`${parsed.groups.A.length+parsed.groups.B.length} mögliche Teams erkannt. Bitte jeden Namen kontrollieren.`;preview(parsed,'Foto (ungeprüfte OCR)');}catch(e){pendingImport=null;$('applyPreview').disabled=true;setMessage('Keine zuverlässige Gruppe erkannt. '+e.message);$('ocrStatus').textContent='Bitte ein zugeschnittenes Bild der eigentlichen Tabelle verwenden.';}}finally{await worker.terminate();}}catch(error){$('ocrStatus').textContent='Fotoerkennung derzeit nicht verfügbar: '+error.message+'. Das Foto bleibt sichtbar; bitte Teamnamen im Textfeld eingeben.';}finally{$('readPhoto').disabled=false;}}
+async function updateImportTeam(e){
+ if(!pendingImport)return;
+ const input=e.target.closest('[data-team-group]');
+ if(input){
+  const group=input.dataset.teamGroup,idx=Number(input.dataset.teamIndex),before=pendingImport.groups[group]?.[idx];
+  if(before===undefined)return;
+  const renamed=clean(input.value);if(!renamed)return;
+  pendingImport.groups[group][idx]=renamed;
+  for(const f of pendingImport.fixtures||[]){if(f.group!==group)continue;if(f.home===before)f.home=renamed;if(f.away===before)f.away=renamed;}
+  preview(pendingImport,'Bearbeitete Vorschau');return;
+ }
+ const b=e.target.closest('[data-remove-team]');if(!b)return;
+ const [group,rawIndex]=b.dataset.removeTeam.split(':'),idx=Number(rawIndex);
+ const name=pendingImport.groups[group]?.[idx];if(!name)return;
+ const affected=(pendingImport.fixtures||[]).filter(f=>f.group===group&&(f.home===name||f.away===name));
+ if(affected.length&&!await appConfirm(`Wenn du „${name}“ entfernst, entfallen auch ${affected.length} Begegnungen dieses Teams. Wirklich entfernen?`,'Team aus Import entfernen','Entfernen'))return;
+ pendingImport.groups[group].splice(idx,1);
+ if(affected.length)pendingImport.fixtures=pendingImport.fixtures.filter(f=>!affected.includes(f));
+ preview(pendingImport,'Bearbeitete Vorschau');
+}
+async function applyImport(){
+ if(!pendingImport)return;
+ pendingImport.groups={A:unique(pendingImport.groups.A||[]),B:unique(pendingImport.groups.B||[])};
+ const rows=[...pendingImport.groups.A,...pendingImport.groups.B];
+ if(!rows.length&&!pendingImport.fixtures.length){await appAlert('Bitte mindestens ein plausibles Team oder eine Begegnung erfassen.','Import prüfen');return;}
+ if(new Set(rows.map(v=>v.toLocaleLowerCase('de'))).size!==rows.length){await appAlert('Teamnamen dürfen nicht doppelt oder in beiden Gruppen vorkommen.','Import prüfen');return;}
+ const bad=(pendingImport.fixtures||[]).filter(f=>!pendingImport.groups[f.group]?.includes(f.home)||!pendingImport.groups[f.group]?.includes(f.away));
+ if(bad.length){await appAlert(`${bad.length} Begegnungen enthalten Mannschaften, die nicht in der jeweiligen Gruppe stehen. Bitte die Vorschau kontrollieren.`,'Import prüfen');return;}
+ if((event().fixtures.length||event().ko.length)&&!await appConfirm('Gruppen und Gruppenspielplan ersetzen? Vorhandene Gruppenergebnisse werden gelöscht, die Finalrunde bleibt bestehen.','Import übernehmen','Ersetzen'))return;
+ const pdfMeta=importMetaSelection&&pendingImport.meta?.kind==='pdf-structured'?pendingImport.meta:null;
+ event().groups={...pendingImport.groups};event().fixtures=pendingImport.fixtures;
+ if(pdfMeta){
+  const selected=app.tournaments.find(t=>t.id===app.active);
+  if(selected){if(pdfMeta.title)selected.title=clean(pdfMeta.title);if(pdfMeta.date)selected.date=pdfMeta.date;if(pdfMeta.venue)selected.venue=clean(pdfMeta.venue);}
+  if(Number.isInteger(pdfMeta.duration)&&pdfMeta.duration>=1&&pdfMeta.duration<=90){event().duration=pdfMeta.duration;event().seconds=pdfMeta.duration*60;}
+ }
+ $('groupA').value=event().groups.A.join('\n');$('groupB').value=event().groups.B.join('\n');
+ event().liveId=null;event().running=false;pendingImport=null;importMetaSelection=false;$('applyPreview').disabled=true;
+ closeImportSheet();render();showTab(event().fixtures.length?'plan':'groups');
+}
+async function recognize(){if(!pendingImage){$('ocrStatus').textContent='Bitte zuerst ein Bild auswählen.';return;}$('readPhoto').disabled=true;$('ocrStatus').textContent='OCR wird geladen – Internetverbindung erforderlich …';try{if(!window.Tesseract){await new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';s.onload=resolve;s.onerror=()=>reject(Error('OCR-Bibliothek nicht geladen'));document.head.append(s);});}const worker=await Tesseract.createWorker('deu+eng',1,{logger:m=>{if(m.status==='recognizing text')$('ocrStatus').textContent=`Lese Bild: ${Math.round(m.progress*100)} %`;}});try{const result=await worker.recognize(pendingImage);$('rawImport').value=result.data.text;if($('advancedImportText'))$('advancedImportText').open=true;try{const parsed=parsePhotoText(result.data.text);$('ocrStatus').textContent=`${parsed.groups.A.length+parsed.groups.B.length} mögliche Teams erkannt. Bitte jeden Namen kontrollieren.`;preview(parsed,'Foto (ungeprüfte OCR)');}catch(e){pendingImport=null;$('applyPreview').disabled=true;setMessage('Keine zuverlässige Gruppe erkannt. '+e.message);$('ocrStatus').textContent='Bitte ein zugeschnittenes Bild der eigentlichen Tabelle verwenden.';}}finally{await worker.terminate();}}catch(error){$('ocrStatus').textContent='Fotoerkennung derzeit nicht verfügbar: '+error.message+'. Das Foto bleibt sichtbar; bitte Teamnamen im Textfeld eingeben.';}finally{$('readPhoto').disabled=false;}}
 async function loadPdfFile(file){
  $('ocrStatus').textContent='PDF wird gelesen … (erstmaliges Laden benötigt Internet)';
  if(!window.pdfjsLib){
-  await new Promise((resolve,reject)=>{const el=document.createElement('script');el.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';el.onload=resolve;el.onerror=()=>reject(Error('PDF-Bibliothek konnte nicht geladen werden'));document.head.append(el);});
+  await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';script.onload=resolve;script.onerror=()=>reject(Error('PDF-Bibliothek konnte nicht geladen werden'));document.head.append(script);});
  }
  const pdf=window.pdfjsLib;pdf.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
  const bytes=await file.arrayBuffer();if(bytes.byteLength>12000000)throw Error('PDF ist zu groß (maximal 12 MB)');
@@ -191,16 +341,15 @@ async function loadPdfFile(file){
  const pages=[];
  for(let p=1;p<=Math.min(doc.numPages,15);p++){
   const page=await doc.getPage(p),txt=await page.getTextContent();
-  const records=(txt.items||[]).filter(x=>x.str?.trim()).map(x=>({text:x.str,x:x.transform?.[4]||0,y:x.transform?.[5]||0}));
-  // Group items by physical line; the PDF is kept on-device.
-  const lines=[];for(const item of records){let line=lines.find(r=>Math.abs(r.y-item.y)<3);if(!line){line={y:item.y,items:[]};lines.push(line);}line.items.push(item);}
-  lines.sort((a,b)=>b.y-a.y);pages.push(lines.map(r=>r.items.sort((a,b)=>a.x-b.x).map(x=>x.text).join('   ')).join('\n'));
+  pages.push((txt.items||[]).filter(x=>x.str?.trim()).map(x=>({text:x.str,x:x.transform?.[4]??0,y:x.transform?.[5]??0})));
  }
- const text=pages.join('\n');$('rawImport').value=text.slice(0,50000);
- const result=parsePhotoText(text);
- result.meta={...result.meta,kind:'pdf'};
+ const result=parseTournamentPdfPages(pages);
+ // Display an editable, valid JSON representation of the source PDF. A click on
+ // "Vorschau analysieren" then keeps groups, official fixtures and metadata.
+ $('rawImport').value=JSON.stringify({groups:result.groups,fixtures:result.fixtures.map(({id,events,homeGoals,awayGoals,completed,winner,...row})=>row),meta:result.meta},null,2).slice(0,50000);
  preview(result,'PDF '+file.name);
- $('ocrStatus').textContent=`PDF gelesen: ${result.groups.A.length+result.groups.B.length} Teamnamen vorgeschlagen. Offizielle Begegnungen bitte separat kontrollieren.`;
+ if($('advancedImportText'))$('advancedImportText').open=false;
+ $('ocrStatus').textContent=`PDF gelesen: ${result.groups.A.length+result.groups.B.length} Mannschaften und ${result.fixtures.length} Begegnungen aus ${pages.length} Seite(n). Bitte die Vorschau prüfen.`;
 }
 function csvQuote(v){return '"'+String(v??'').replace(/"/g,'""')+'"';}
 function exportCSV(){const ev=event();let result=['Phase;Gruppe;Heim;Gast;Tore Heim;Tore Gast;Uhrzeit;Feld;Sieger'];for(const f of [...ev.fixtures,...ev.ko])result.push([f.stage,f.group,f.home,f.away,f.homeGoals??'',f.awayGoals??'',f.time,f.field,winner(f)].map(csvQuote).join(';'));result.push('');result.push('Torschütze;Tore');const names={};for(const f of [...ev.fixtures,...ev.ko])for(const g of f.events||[])if(g.side==='ours')names[g.player]=(names[g.player]||0)+1;for(const [name,total] of Object.entries(names).sort((a,b)=>b[1]-a[1]))result.push([name,total].map(csvQuote).join(';'));download('hallenturnier-'+app.active+'.csv','\ufeff'+result.join('\r\n'),'text/csv;charset=utf-8');}
@@ -216,7 +365,7 @@ $('saveTeam').onclick=async()=>{const previousTeam=app.team;const defaultLength=
 $('saveGroups').onclick=()=>groupMake();$('generateGroups').onclick=()=>generate();$('buildKO').onclick=()=>createKO();$('clearKO').onclick=async()=>{if(event().ko.length&&await appConfirm('Finalrunde und ihre Ergebnisse löschen?','Finalrunde entfernen','Löschen')){event().ko=[];event().liveId=null;render();}};
 $('addFixture').onclick=()=>addFixture();$('fixtures').onclick=e=>{const del=e.target.closest('[data-fixture-delete]');if(del){deleteFixture(del.dataset.fixtureDelete);return;}const b=e.target.closest('[data-edit]');if(!b)return;const f=getMatch(b.dataset.edit);if(ourMatch(f)){event().liveId=f.id;event().running=false;event().seconds=matchDuration()*60;showTab('live');}else editScore(f.id);};$('bracket').onclick=e=>{const b=e.target.closest('[data-edit]');if(b)editScore(b.dataset.edit);};
 $('liveChoice').onchange=e=>{event().running=false;event().seconds=matchDuration()*60;event().liveId=e.target.value;renderLive();save();};
-async function importFileHandler(e){const file=e.target.files[0];if(!file)return;pendingImport=null;$('applyPreview').disabled=true;pendingImage=null;$('photoPreview').classList.add('hidden');$('rawImport').value='';$('ocrStatus').textContent='';try{if(file.type.startsWith('image/')||/\.(png|jpe?g|webp)$/i.test(file.name)){pendingImage=file;$('photoPreview').src=URL.createObjectURL(file);$('photoPreview').classList.remove('hidden');setMessage('Foto geladen. „Text aus Foto erkennen“ tippen oder Mannschaften manuell eintragen.');return;}if(file.type==='application/pdf'||/\.pdf$/i.test(file.name)){await loadPdfFile(file);return;}const text=await file.text();$('rawImport').value=text.slice(0,50000);const parsed=/\.json$/i.test(file.name)?parseJSON(text):parseCSV(text);preview(parsed,'Datei '+file.name);}catch(err){setMessage('Importfehler: '+err.message);}}
+async function importFileHandler(e){const file=e.target.files[0];if(!file)return;importMetaSelection=false;pendingImport=null;$('applyPreview').disabled=true;pendingImage=null;$('photoPreview').classList.add('hidden');$('rawImport').value='';$('ocrStatus').textContent='';if($('advancedImportText'))$('advancedImportText').open=false;try{if(file.type.startsWith('image/')||/\.(png|jpe?g|webp)$/i.test(file.name)){pendingImage=file;$('photoPreview').src=URL.createObjectURL(file);$('photoPreview').classList.remove('hidden');setMessage('Foto geladen. „Text aus Foto erkennen“ tippen oder Mannschaften manuell eintragen.');if($('advancedImportText'))$('advancedImportText').open=true;return;}if(file.type==='application/pdf'||/\.pdf$/i.test(file.name)){await loadPdfFile(file);return;}const text=await file.text();$('rawImport').value=text.slice(0,50000);const parsed=/\.json$/i.test(file.name)?parseJSON(text):parseCSV(text);preview(parsed,'Datei '+file.name);}catch(err){setMessage('Importfehler: '+err.message);}finally{e.target.value='';}}
 $('importFile').onchange=importFileHandler;$('cameraPhoto').onchange=importFileHandler;
 $('importPreview').addEventListener('change',updateImportTeam);$('importPreview').addEventListener('click',updateImportTeam);$('readPhoto').onclick=recognize;$('previewText').onclick=()=>{try{const raw=$('rawImport').value.trim();if(!raw)throw Error('Textfeld leer');let parsed;if(raw.startsWith('{'))parsed=parseJSON(raw);else if(/^\s*(gruppe|group)\s*[;,\t]/i.test(raw)||/\b(heim|home|mannschaft|team)\b\s*[;,\t]/i.test(raw.split('\n')[0]))parsed=parseCSV(raw);else parsed=parsePhotoText(raw);preview(parsed,'Textvorschau');}catch(err){pendingImport=null;$('applyPreview').disabled=true;setMessage(err.message);}};$('applyPreview').onclick=applyImport;
 $('saveUrl').onclick=async()=>{const val=$('onlineUrl').value.trim();if(val&&!validURL(val)){await appAlert('Bitte eine gültige http(s)-Adresse eingeben.','Online-Tabelle');return;}event().url=val;save();await appAlert('Link gespeichert.','Online-Tabelle');};$('openUrl').onclick=async()=>{const u=validURL($('onlineUrl').value.trim());if(!u){await appAlert('Zuerst einen gültigen Link eingeben.','Online-Tabelle');return;}window.open(u.href,'_blank','noopener,noreferrer');};$('importUrl').onclick=async()=>{
