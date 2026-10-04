@@ -4,18 +4,18 @@ const KEY='matchday-bridge-minutes-v1',host=()=>window.MatchdayBridgeHost,elemen
 let pending=null,teamChoice='',gameChoice=1,logs={},locked=false;
 try{const raw=localStorage.getItem(KEY);if(raw){logs=JSON.parse(raw);if(!logs||typeof logs!=='object'||Array.isArray(logs))throw Error('invalid')}}catch(e){locked=true}
 const snapshot=()=>host()?.snapshot?.(),evkey=s=>s?.bridgeEvent?.eventId;
-const record=s=>logs[evkey(s)]||{eventId:evkey(s),eventName:s.bridgeEvent?.eventName||'',date:s.bridgeEvent?.date||'',players:s.playerRefs||[],games:[]};
+const record=s=>logs[evkey(s)]||{eventId:evkey(s),rosterId:s.bridgeEvent?.rosterId||'',eventName:s.bridgeEvent?.eventName||'',date:s.bridgeEvent?.date||'',players:s.playerRefs||[],games:[]};
 function create(tag,text,parent,props){const e=document.createElement(tag);if(text!==null&&text!==undefined)e.textContent=text;for(const [k,v] of Object.entries(props||{}))if(k==='className')e.className=v;else if(k==='value')e.value=v;else if(k==='type')e.type=v;else if(k==='disabled')e.disabled=v;else if(k==='min'||k==='max'||k==='step'||k==='accept'||k==='inputmode')e.setAttribute(k,v);if(parent)parent.append(e);return e}
 function msg(text){const e=element('mb-notice');if(e){e.textContent=text;e.hidden=!text}}
 function checkedFile(raw){
- if(raw?.schema!=='sport-coach-bridge-v1'||raw.kind!=='lineup'||typeof raw.eventId!=='string'||!raw.eventId.trim()||raw.eventId.length>130||!Array.isArray(raw.teams)||!raw.teams.length||raw.teams.length>16)throw Error('Keine gültige Matchday-Aufstellung');
+ if(raw?.schema!=='sport-coach-bridge-v1'||raw.kind!=='lineup'||typeof raw.eventId!=='string'||!raw.eventId.trim()||raw.eventId.length>130||typeof raw.rosterId!=='string'||!raw.rosterId.trim()||raw.rosterId.length>130||!Array.isArray(raw.teams)||!raw.teams.length||raw.teams.length>16)throw Error('Keine gültige Matchday-Aufstellung');
  const ids=new Set(),teams=raw.teams.map(t=>{
    if(typeof t?.id!=='string'||typeof t?.name!=='string'||!Array.isArray(t.players)||!t.players.length||t.players.length>30)throw Error('Ungültige Mannschaft');
    const players=t.players.map(p=>{if(typeof p?.id!=='string'||typeof p?.name!=='string'||!p.id.trim()||!p.name.trim()||p.id.length>128||p.name.length>100||ids.has(p.id))throw Error('Ungültige oder doppelte Spieler-ID');ids.add(p.id);return{id:p.id,name:p.name.trim()}});
    if(new Set(players.map(p=>p.name.toLocaleLowerCase())).size!==players.length)throw Error('Gleiche Spielernamen in einer Mannschaft. Bitte vor dem Export unterscheiden.');
    return{id:t.id,name:t.name.slice(0,70),players};
  });
- return{eventId:raw.eventId,eventName:String(raw.eventName||'Spieltag').slice(0,100),date:String(raw.date||'').slice(0,10),teams};
+ return{eventId:raw.eventId,rosterId:raw.rosterId,eventName:String(raw.eventName||'Spieltag').slice(0,100),date:String(raw.date||'').slice(0,10),teams};
 }
 function download(doc){const url=URL.createObjectURL(new Blob([JSON.stringify(doc,null,2)],{type:'application/json'})),link=create('a',null,document.body);link.href=url;link.download='Matchday-Spielzeiten-'+doc.date+'.json';link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),2200)}
 function rebuild(note){
@@ -62,7 +62,7 @@ function importTeam(){
  const team=pending?.teams.find(x=>x.id===teamChoice),s=snapshot();if(!team)return;
  if(s.game!==1||s.history.length||s.goals.length||s.finished||s.running){msg('Das aktuelle Turnier hat bereits Spieldaten. Zuerst CSV exportieren und ein neues Turnier starten; nichts wurde verändert.');return}
  if(!confirm(team.name+' mit '+team.players.length+' Spielern übernehmen? Nur der Matchday-Kader wird geändert.'))return;
- try{host().importTeam(team.players,{eventId:pending.eventId+'::'+team.id,eventName:pending.eventName,date:pending.date,teamName:team.name});pending=null;announce('Kader übernommen. Die Spieler-IDs bleiben für den Ergebnisexport erhalten.')}catch(e){msg('Import abgelehnt: '+e.message)}
+ try{host().importTeam(team.players,{eventId:pending.eventId+'::'+team.id,rosterId:pending.rosterId,eventName:pending.eventName,date:pending.date,teamName:team.name});pending=null;announce('Kader übernommen. Die Spieler-IDs bleiben für den Ergebnisexport erhalten.')}catch(e){msg('Import abgelehnt: '+e.message)}
 }
 function saveMinutes(){
  if(locked){msg('Spielzeit-Speicher ist beschädigt; kein Überschreiben.');return}
@@ -77,7 +77,7 @@ function saveMinutes(){
 function exportMinutes(){
  const s=snapshot(),r=record(s);if(!r.games.length)return;
  if(!confirm('Spielminuten für SpielfeldIQ als private JSON-Datei exportieren?'))return;
- download({schema:'sport-coach-matchday-results-v1',eventId:r.eventId,eventName:r.eventName,date:r.date,createdAt:new Date().toISOString(),games:r.games.map(g=>({game:g.game,minutes:{...g.minutes},loggedAt:g.loggedAt}))});
+ download({schema:'sport-coach-matchday-results-v1',eventId:r.eventId,rosterId:r.rosterId,eventName:r.eventName,date:r.date,createdAt:new Date().toISOString(),games:r.games.map(g=>({game:g.game,minutes:{...g.minutes},loggedAt:g.loggedAt}))});
  msg('JSON-Bericht heruntergeladen. Import in SpielfeldIQ → Teamgenerator → Spielzeit & faire Teams.');
 }
 document.addEventListener('change',e=>{
