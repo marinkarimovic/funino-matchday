@@ -84,3 +84,14 @@ Die Import-Vorschau ist vor dem Übernehmen sichtbar. Das Laden ersetzt die vorh
 - Bestehende v3-Hallenergebnisse werden aus `matchday_hall_v3` übernommen; bei der Migration werden nur tatsächlich gespeicherte Turniere sichtbar.
 - Die Turnierliste und JSON-Sicherung enthalten alle selbst angelegten Turniere.
 - Löschen eines Turniers entfernt dessen Matchdaten **nur auf diesem Gerät**; vorab Sicherung exportieren.
+## FUNiño v5.0: SpielfeldIQ-Spielerkader und ausdrücklich erfasste Spielzeit
+
+Unter **FUNiño → SpielfeldIQ ↔ Matchday** kann eine **ausgewählte, privat gespeicherte JSON-Datei** aus dem SpielfeldIQ-Teamgenerator importiert werden (`sport-coach-bridge-v1`). Bei mehreren Mannschaften lässt sich exakt eine Mannschaft auswählen. Die Spieler behalten ihre stabilen IDs; Tore erhalten ab diesem Zeitpunkt bei einem eindeutig zuordenbaren Namen zusätzlich die Spieler-ID.
+
+**Sicherheit:** Der Import ist ausdrücklich bestätigungspflichtig und wird abgelehnt, sobald Spieldaten oder eine laufende Partie vorhanden sind. Vor dem Import wird eine zusätzliche lokale Vorher-Kopie unter `funino-matchday-import-undo-v1` gespeichert. Bereits vorhandene Matchday-Spieler und Ergebnisse werden nicht ungefragt auf das andere Team gemischt. Bei manueller Änderung der Spielernamen in den FUNiño-Einstellungen wird die ID-Verknüpfung vorsichtshalber getrennt.
+
+Nach dem Abschluss einer Partie lassen sich die tatsächlichen Spielminuten je Kind manuell bestätigen, inklusive expliziter 0 Minuten oder unbekannt/leer. Der separate lokale Speicher `matchday-bridge-minutes-v1` hält die freiwilligen Spielzeitaufzeichnungen. Nach dem letzten oder einzelnen Spielen können diese als `sport-coach-matchday-results-v1` für SpielfeldIQ exportiert werden. Alte Spiele ohne Minutenprotokoll werden nicht rückwirkend geschätzt.
+
+Ein Import darf nur mit der eigenen Spielerdatei erfolgen; Dateien enthalten personenbezogene Kinderdaten. Keine URL-Parameter mit Spielerdaten, keine Serverübertragung, keine automatische Cloud-Synchronisierung. Ein iPhone-Homescreen-App-Profil kann vom Safari-Profil getrennt sein – deshalb funktioniert die Übergabe via exportierter und manuell importierter Datei. Der Hallenturnier-Modus ist hiervon **noch nicht** betroffen.
+
+Offline-Cache `funino-matchday-v5.0` beinhaltet `bridge-transfer.js`. Bei einem echten Matchday bitte zuvor den vorhandenen CSV-Export verwenden und die App nicht deinstallieren.
