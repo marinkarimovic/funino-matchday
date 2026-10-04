@@ -10,10 +10,10 @@ window.MatchdayBridgeHost=Object.freeze({
     if(s.game!==1||s.history.length||s.goals.length||s.finished||s.running)throw Error('Das Turnier wurde bereits gestartet. Bitte zuerst Ergebnisse exportieren und ein neues Turnier beginnen; bestehende Spiele bleiben unverändert.');
     if(!roster.every(p=>p&&typeof p.id==='string'&&p.id&&typeof p.name==='string'&&p.name.trim()))throw Error('Spieler ohne ID oder Namen');
     if(new Set(roster.map(p=>p.id)).size!==roster.length||new Set(roster.map(p=>p.name.trim().toLocaleLowerCase())).size!==roster.length)throw Error('Doppelte Spieler-ID oder doppelte Namen. Bitte die Aufstellung in SpielfeldIQ korrigieren.');
-    if(!meta||typeof meta.eventId!=='string'||meta.eventId.length>140)throw Error('Spieltag-ID fehlt');
+    if(!meta||typeof meta.eventId!=='string'||meta.eventId.length>140||typeof meta.rosterId!=='string'||!meta.rosterId||meta.rosterId.length>130)throw Error('Spieltag- oder Kader-ID fehlt');
     try{localStorage.setItem('funino-matchday-import-undo-v1',JSON.stringify(s))}catch(e){throw Error('Sicherheitskopie konnte nicht angelegt werden. Bitte Speicherplatz prüfen.')};
     s.players=roster.map(p=>p.name.trim());s.playerRefs=roster.map(p=>({id:p.id,name:p.name.trim()}));
-    s.name=String(meta.teamName||s.name).slice(0,50);s.bridgeEvent={eventId:meta.eventId,eventName:String(meta.eventName||'Funino-Spieltag').slice(0,100),date:String(meta.date||'').slice(0,10)};
+    s.name=String(meta.teamName||s.name).slice(0,50);s.bridgeEvent={eventId:meta.eventId,rosterId:meta.rosterId,eventName:String(meta.eventName||'Funino-Spieltag').slice(0,100),date:String(meta.date||'').slice(0,10)};
     s.seconds=s.duration*60;render();
     return s.bridgeEvent;
   }
