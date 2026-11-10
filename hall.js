@@ -230,6 +230,69 @@ function parseJSON(s){
  }).filter(f=>f.home&&f.away&&f.home!==f.away);
  return {groups,fixtures,meta:obj.meta&&typeof obj.meta==='object'?{...obj.meta,kind:'pdf-structured'}:null};
 }
+function ocrTeamKey(value){return String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('de').replace(/0/g,'o').replace(/[^a-z0-9]/g,'');}
+function ocrDistance(a,b){a=ocrTeamKey(a);b=ocrTeamKey(b);if(a===b)return 0;if(!a||!b)return Math.max(a.length,b.length);const row=Array.from({length:b.length+1},(_,i)=>i);for(let i=1;i<=a.length;i++){let prev=row[0];row[0]=i;for(let j=1;j<=b.length;j++){const old=row[j];row[j]=Math.min(row[j]+1,row[j-1]+1,prev+(a[i-1]===b[j-1]?0:1));prev=old;}}return row[b.length];}
+function ocrSimilar(a,b){const x=ocrTeamKey(a),y=ocrTeamKey(b);if(!x||!y)return false;if(x===y)return true;const min=Math.min(x.length,y.length),max=Math.max(x.length,y.length);if(min>=6&&(x.includes(y)||y.includes(x))&&min/max>=0.72)return true;return ocrDistance(x,y)/max<=0.36;}
+function cleanOcrTeam(value){let v=String(value||'').replace(/[\[\]{}]/g,' ').replace(/[|_]+/g,' ').replace(/[—–]+/g,' ').replace(/(?<=\p{L})0(?=\p{L})/gu,'o').replace(/\s+/g,' ').trim();v=v.replace(/^[^\p{L}]+/u,'').replace(/[^\p{L}\p{N}.&/ +\-]+$/u,'').trim();v=v.replace(/([a-zäöüß])([A-ZÄÖÜ])/g,'$1 $2');return clean(v);}
+function parseOcrClock(value){const digits=String(value||'').replace(/[^0-9]/g,'');if(digits.length!==3&&digits.length!==4)return null;const h=Number(digits.length===3?digits[0]:digits.slice(0,2)),m=Number(digits.length===3?digits.slice(1):digits.slice(2));if(h>23||m>59)return null;return h*60+m;}
+function fmtMinutes(value){const v=((value%1440)+1440)%1440;return `${String(Math.floor(v/60)).padStart(2,'0')}:${String(v%60).padStart(2,'0')}`;}
+function parseMeinTurnierplanScreenshotText(metaText,scheduleText){
+ const meta=String(metaText||'').replace(/\r/g,'');
+ const schedule=String(scheduleText||'').replace(/\r/g,'');
+ const dateMatch=meta.match(/(?:Datum\s*:\s*)?(\d{2})\.(\d{2})\.(\d{4})/i);
+ const durationMatch=meta.match(/Spieldauer[^\n:]*:?\s*(\d{1,2})\s*Minuten/i);
+ const organizer=(meta.match(/Veranstalter\s*:\s*([^\n]+)/i)?.[1]||'').trim();
+ const venue=(meta.match(/Veranstaltungsort\s*:\s*([^\n]+)/i)?.[1]||'').trim();
+ const titleLines=meta.split(/\n+/).map(clean).filter(Boolean).filter(x=>!/^(?:Veranstalter|Datum|Veranstaltungsort|Spieldauer|Platzierungsmodus)/i.test(x));
+ const title=titleLines.slice(0,2).join(' ').slice(0,90);
+ const rows=[];
+ const groupFromToken=value=>{const v=String(value||'').replace(/[^A-Za-z0-9@]/g,'').toLowerCase();if(v==='a'||v==='x'||v==='4')return'A';if(v==='b'||v==='8'||v==='e'||v==='o'||v==='@'||v==='6')return'B';return'';};
+ for(const raw of schedule.split(/\n+/)){
+  if(!/\p{L}/u.test(raw))continue;
+  const line=raw.replace(/[\[\]{}]/g,'|').replace(/¦/g,'|').replace(/\|{2,}/g,'|');
+  const parts=line.split('|').map(v=>v.trim()).filter(Boolean);if(parts.length<4)continue;
+  let timeIdx=-1,timeMin=null;
+  for(let i=0;i<parts.length;i++){const t=parseOcrClock(parts[i]);if(t!==null){timeIdx=i;timeMin=t;break;}}
+  if(timeIdx<0){timeIdx=parts.findIndex(v=>{const d=v.replace(/[^0-9]/g,'');return d.length===3||d.length===4;});}
+  if(timeIdx<0){const gidx=parts.findIndex(v=>groupFromToken(v));if(gidx<=0)continue;timeIdx=gidx-1;}
+  let cursor=timeIdx+1,group='';
+  if(parts[cursor]){group=groupFromToken(parts[cursor]);if(parts[cursor].length<=4||group)cursor++;}
+  const teamParts=parts.slice(cursor).map(cleanOcrTeam).filter(v=>v&&v.length>=3&&/\p{L}/u.test(v)&&!/^ergebnis$/i.test(v));
+  if(teamParts.length<2)continue;
+  const home=teamParts[0],away=teamParts[1];if(ocrTeamKey(home)===ocrTeamKey(away))continue;
+  rows.push({no:rows.length+1,timeMin,group,home,away});
+ }
+ if(rows.length<3)throw Error('Im Spielplanbereich wurden zu wenige verlässliche Begegnungen gelesen.');
+ // Cluster OCR spelling variants separately per group so A/B variants such as "Union Puchenau A/B" never merge.
+ const buckets={A:[],B:[],X:[]};
+ const chooseCanonical=(bucket,value)=>{let found=bucket.find(x=>ocrSimilar(x,value));if(!found){bucket.push(value);return value;}const score=v=>(v.match(/\s/g)||[]).length*3+v.length;if(score(value)>score(found)){const idx=bucket.indexOf(found);bucket[idx]=value;return value;}return found;};
+ // First pass: safely read groups establish canonical buckets.
+ for(const r of rows){const b=['A','B'].includes(r.group)?r.group:'X';r.home=chooseCanonical(buckets[b],r.home);r.away=chooseCanonical(buckets[b],r.away);}
+ // Re-resolve within each bucket after better spellings replaced earlier representatives.
+ for(const r of rows){const b=['A','B'].includes(r.group)?r.group:'X';const h=buckets[b].find(x=>ocrSimilar(x,r.home));const a=buckets[b].find(x=>ocrSimilar(x,r.away));if(h)r.home=h;if(a)r.away=a;}
+ // Unknown group rows can usually be assigned from a team already seen in a reliable A/B row.
+ for(const r of rows){if(['A','B'].includes(r.group))continue;for(const g of ['A','B']){const known=buckets[g];if(known.some(x=>ocrSimilar(x,r.home)||ocrSimilar(x,r.away))){r.group=g;break;}}}
+ // Merge unknown spellings into the now-known group buckets.
+ for(const r of rows){if(!['A','B'].includes(r.group))continue;const b=buckets[r.group];r.home=chooseCanonical(b,r.home);r.away=chooseCanonical(b,r.away);}
+ for(const r of rows){if(!['A','B'].includes(r.group))continue;const b=buckets[r.group],h=b.find(x=>ocrSimilar(x,r.home)),a=b.find(x=>ocrSimilar(x,r.away));if(h)r.home=h;if(a)r.away=a;}
+ // If one or two rows remain unlabeled but their opponents form one connected set, assign the opposite of the other group only when unambiguous.
+ for(const r of rows){if(['A','B'].includes(r.group))continue;const possible=['A','B'].filter(g=>buckets[g].some(x=>ocrSimilar(x,r.home)||ocrSimilar(x,r.away)));if(possible.length===1)r.group=possible[0];}
+ const known=rows.filter(r=>r.timeMin!==null).sort((a,b)=>a.no-b.no),steps=[];for(let i=1;i<known.length;i++){const dn=known[i].no-known[i-1].no,dt=known[i].timeMin-known[i-1].timeMin;if(dn>0&&dt>0&&dt/dn>=3&&dt/dn<=30)steps.push(Math.round(dt/dn));}steps.sort((a,b)=>a-b);const step=steps.length?steps[Math.floor(steps.length/2)]:null,anchor=known[0];if(step&&anchor)for(const r of rows)if(r.timeMin===null)r.timeMin=anchor.timeMin+(r.no-anchor.no)*step;
+ const groups={A:[],B:[]};for(const r of rows){if(!['A','B'].includes(r.group))continue;groups[r.group].push(r.home,r.away);}groups.A=unique(groups.A);groups.B=unique(groups.B);
+ const fixtures=rows.filter(r=>['A','B'].includes(r.group)).map(r=>{const f=match(r.home,r.away,r.group,'group',r.timeMin===null?'':fmtMinutes(r.timeMin),'');f.sourceNo=r.no;return f;});
+ if(!groups.A.length&&!groups.B.length)throw Error('Gruppen konnten aus den erkannten Begegnungen nicht sicher abgeleitet werden.');
+ const notes=['Fotoimport ist OCR-basiert: Teamnamen und Uhrzeiten bitte kontrollieren.'];
+ if(rows.length!==fixtures.length)notes.push(`${rows.length-fixtures.length} erkannte Zeilen konnten keiner Gruppe sicher zugeordnet werden.`);
+ if(/Finalrunde/i.test(schedule))notes.push('Finalrunde aus dem Foto nicht automatisch übernommen; dafür bitte den offiziellen PDF-Spielplan verwenden.');
+ return {groups,fixtures,meta:{kind:'ocr-structured',title,date:dateMatch?`${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}`:'',organizer,venue,duration:durationMatch?Number(durationMatch[1]):null,notes}};
+}
+function extractOcrParticipantCandidates(text){const out=[];const club=/\b(?:FC|SC|SV|TSV|TuS|MSW|SF|SPG|Union|ASK[ÖO]?|ASKO|NSG|SKN|First)\b/i;for(const raw of String(text||'').split(/\n+/)){let line=raw.replace(/[\[\]{}]/g,'|').replace(/¦/g,'|');const segments=line.split('|').flatMap(seg=>{const starts=[...seg.matchAll(/\b(?:FC|SC|SV|TSV|TuS|MSW|SF|SPG|Union|ASK[ÖO]?|ASKO|NSG|SKN|First)\b/gi)].map(m=>m.index);if(starts.length<=1)return[seg];const parts=[];for(let i=0;i<starts.length;i++)parts.push(seg.slice(starts[i],starts[i+1]??seg.length));return parts;});for(let seg of segments){seg=seg.replace(/^\s*\d{1,2}[.)\]]?\s*/,'');const m=seg.match(club);if(m&&m.index>0)seg=seg.slice(m.index);const v=cleanOcrTeam(seg);if(v.length>=4&&v.length<=60&&/\p{L}/u.test(v)&&!/(Teilnehmer|Gruppe|Vorrunde|Platzierungsmodus)/i.test(v))out.push(v);}}return unique(out);}
+function improveStructuredOcrNames(parsed,candidates){if(!parsed||!candidates?.length)return parsed;const suffix=v=>String(v||'').match(/\b([AB])\s*$/i)?.[1]?.toUpperCase()||'';for(const group of ['A','B']){for(let i=0;i<parsed.groups[group].length;i++){const before=parsed.groups[group][i],bs=suffix(before);const matches=candidates.filter(c=>{const cs=suffix(c);if(bs&&cs&&bs!==cs)return false;return ocrSimilar(c,before);});if(!matches.length)continue;matches.sort((a,b)=>{const score=v=>(v.match(/\s/g)||[]).length*4+v.length;return score(b)-score(a);});const after=matches[0];parsed.groups[group][i]=after;for(const f of parsed.fixtures){if(f.group!==group)continue;if(f.home===before)f.home=after;if(f.away===before)f.away=after;}}}return parsed;}
+async function loadImageBitmapForOcr(file){if('createImageBitmap' in window)return createImageBitmap(file);return new Promise((resolve,reject)=>{const img=new Image(),url=URL.createObjectURL(file);img.onload=()=>{URL.revokeObjectURL(url);resolve(img);};img.onerror=()=>{URL.revokeObjectURL(url);reject(Error('Bild konnte nicht geöffnet werden'));};img.src=url;});}
+function ocrCropCanvas(image,left,top,right,bottom,scale=3){const sw=image.width*(right-left),sh=image.height*(bottom-top);const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(sw*scale));canvas.height=Math.max(1,Math.round(sh*scale));const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.filter='grayscale(1) contrast(1.9)';ctx.drawImage(image,image.width*left,image.height*top,sw,sh,0,0,canvas.width,canvas.height);return canvas;}
+async function recognizeMeinTurnierplanScreenshot(worker,file){const image=await loadImageBitmapForOcr(file);await worker.setParameters({tessedit_pageseg_mode:'6',preserve_interword_spaces:'1'});const metaCanvas=ocrCropCanvas(image,0.015,0.015,0.78,0.22,3);const participantCanvas=ocrCropCanvas(image,0.015,0.19,0.75,0.36,3);const scheduleCanvas=ocrCropCanvas(image,0.015,0.32,0.62,0.66,3);const metaResult=await worker.recognize(metaCanvas),participantResult=await worker.recognize(participantCanvas),scheduleResult=await worker.recognize(scheduleCanvas);const parsed=improveStructuredOcrNames(parseMeinTurnierplanScreenshotText(metaResult.data.text,scheduleResult.data.text),extractOcrParticipantCandidates(participantResult.data.text));return {parsed,raw:`${metaResult.data.text}\n\nTeilnehmer\n${participantResult.data.text}\n\nVorrunde\n${scheduleResult.data.text}`};}
+function meinturnierplanPdfUrl(url){if(!url||!/(^|\.)meinturnierplan\.de$/i.test(url.hostname))return null;const id=url.pathname.match(/^\/c\/([^/]+)/i)?.[1];return id?`https://www.meinturnierplan.de/pdf.php?id=${encodeURIComponent(id)}`:null;}
+
 // Only rows inside identified group tables are considered team names when processing OCR.
 // Ordinary text under explicit "Gruppe A/B" headings is also supported for manual input.
 function parsePhotoText(input){
@@ -275,7 +338,8 @@ function preview(parsed,source){
  const count=parsed.fixtures?.length||0;
  $('applyPreview').disabled=!total&&!count;
  const isPDF=parsed.meta?.kind==='pdf-structured';
- const status=parsed.meta?.kind==='ocr'?'<p class="hint">Fotoerkennung: Bitte jeden Teamnamen kontrollieren. Es werden keine Spielpaarungen aus einem Tabellenfoto erfunden.</p>':'';
+ const isStructuredOCR=parsed.meta?.kind==='ocr-structured';
+ const status=parsed.meta?.kind==='ocr'?'<p class="hint">Fotoerkennung: Bitte jeden Teamnamen kontrollieren. Es werden keine Spielpaarungen aus einem einfachen Tabellenfoto erfunden.</p>':isStructuredOCR?'<p class="hint">📸 MeinTurnierplan-Screenshot erkannt. Begegnungen wurden per OCR gelesen – bitte Teamnamen und Uhrzeiten besonders sorgfältig prüfen.</p>':'';
  const groupsHTML=['A','B'].map(group=>{
   const teams=parsed.groups[group]||[];
   if(!teams.length)return '';
@@ -283,7 +347,7 @@ function preview(parsed,source){
  }).join('');
  const meta=parsed.meta||{};
  const metaFields=[meta.title,meta.date?meta.date.split('-').reverse().join('.'):null,meta.duration?meta.duration+' Minuten':null].filter(Boolean);
- const metaHTML=isPDF?`<div class="import-summary"><strong>📄 Offizieller PDF-Spielplan erkannt</strong><div>${escapeHTML(metaFields.join(' · '))}</div><div>${parsed.groups.A.length} Teams in Gruppe A · ${parsed.groups.B.length} Teams in Gruppe B · ${count} Begegnungen</div><label class="import-metadata-option"><input id="importMetadata" type="checkbox" ${importMetaSelection?'checked':''}/> <span>Auch Turniername, Datum, Ort und Spielzeit aus dem PDF übernehmen</span></label><p class="hint">Standardmäßig bleiben deine vorhandenen Turnierdaten unverändert. Aktiviere die Option nur, wenn das PDF zum ausgewählten Turnier gehört.</p></div>`:'';
+ const metaHTML=(isPDF||isStructuredOCR)?`<div class="import-summary"><strong>${isPDF?'📄 Offizieller PDF-Spielplan erkannt':'📸 Strukturierter Screenshot erkannt'}</strong><div>${escapeHTML(metaFields.join(' · '))}</div><div>${parsed.groups.A.length} Teams in Gruppe A · ${parsed.groups.B.length} Teams in Gruppe B · ${count} Begegnungen</div><label class="import-metadata-option"><input id="importMetadata" type="checkbox" ${importMetaSelection?'checked':''}/> <span>Auch Turniername, Datum, Ort und Spielzeit aus ${isPDF?'dem PDF':'dem Screenshot'} übernehmen</span></label><p class="hint">Standardmäßig bleiben deine vorhandenen Turnierdaten unverändert. Aktiviere die Option nur, wenn die Quelle zum ausgewählten Turnier gehört.</p></div>`:'';
  const warnings=(meta.notes||[]).length?`<div class="import-warning">⚠️ ${escapeHTML(meta.notes.join(' · '))}. Bitte die fehlenden Spiele manuell ergänzen.</div>`:'';
  const matches=count?`<details class="import-fixtures"><summary>📋 Alle ${count} erkannten Begegnungen prüfen</summary><div class="import-fixture-list">${parsed.fixtures.map((f,i)=>`<div class="import-fixture"><span class="import-fixture-meta">#${f.sourceNo||i+1} · ${escapeHTML(f.time||'Zeit offen')} · ${escapeHTML(f.field||'Feld offen')} · Gr. ${escapeHTML(f.group||'–')}</span><span>${escapeHTML(f.home)} <b>–</b> ${escapeHTML(f.away)}</span></div>`).join('')}</div></details>`:'<p class="hint">0 Paarungen erkannt. Gruppenteams allein ergeben noch keinen offiziellen Spielplan.</p>';
  $('importPreview').innerHTML=`<strong>${escapeHTML(source)} · ${total} Teams</strong>${status}${metaHTML}${warnings}${groupsHTML}${matches}<p class="hint">Erkannte Teams bitte prüfen. Bei Tippfehlern Namen oben ändern; Änderungen werden für die betroffenen Paarungen mitübernommen. Danach „Geprüfte Daten übernehmen“.</p>`;
@@ -318,7 +382,7 @@ async function applyImport(){
  const bad=(pendingImport.fixtures||[]).filter(f=>!pendingImport.groups[f.group]?.includes(f.home)||!pendingImport.groups[f.group]?.includes(f.away));
  if(bad.length){await appAlert(`${bad.length} Begegnungen enthalten Mannschaften, die nicht in der jeweiligen Gruppe stehen. Bitte die Vorschau kontrollieren.`,'Import prüfen');return;}
  if((event().fixtures.length||event().ko.length)&&!await appConfirm('Gruppen und Gruppenspielplan ersetzen? Vorhandene Gruppenergebnisse werden gelöscht, die Finalrunde bleibt bestehen.','Import übernehmen','Ersetzen'))return;
- const pdfMeta=importMetaSelection&&pendingImport.meta?.kind==='pdf-structured'?pendingImport.meta:null;
+ const pdfMeta=importMetaSelection&&['pdf-structured','ocr-structured'].includes(pendingImport.meta?.kind)?pendingImport.meta:null;
  event().groups={...pendingImport.groups};event().fixtures=pendingImport.fixtures;
  if(pdfMeta){
   const selected=app.tournaments.find(t=>t.id===app.active);
@@ -329,7 +393,23 @@ async function applyImport(){
  event().liveId=null;event().running=false;pendingImport=null;importMetaSelection=false;$('applyPreview').disabled=true;
  closeImportSheet();render();showTab(event().fixtures.length?'plan':'groups');
 }
-async function recognize(){if(!pendingImage){$('ocrStatus').textContent='Bitte zuerst ein Bild auswählen.';return;}$('readPhoto').disabled=true;$('ocrStatus').textContent='OCR wird geladen – Internetverbindung erforderlich …';try{if(!window.Tesseract){await new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';s.onload=resolve;s.onerror=()=>reject(Error('OCR-Bibliothek nicht geladen'));document.head.append(s);});}const worker=await Tesseract.createWorker('deu+eng',1,{logger:m=>{if(m.status==='recognizing text')$('ocrStatus').textContent=`Lese Bild: ${Math.round(m.progress*100)} %`;}});try{const result=await worker.recognize(pendingImage);$('rawImport').value=result.data.text;if($('advancedImportText'))$('advancedImportText').open=true;try{const parsed=parsePhotoText(result.data.text);$('ocrStatus').textContent=`${parsed.groups.A.length+parsed.groups.B.length} mögliche Teams erkannt. Bitte jeden Namen kontrollieren.`;preview(parsed,'Foto (ungeprüfte OCR)');}catch(e){pendingImport=null;$('applyPreview').disabled=true;setMessage('Keine zuverlässige Gruppe erkannt. '+e.message);$('ocrStatus').textContent='Bitte ein zugeschnittenes Bild der eigentlichen Tabelle verwenden.';}}finally{await worker.terminate();}}catch(error){$('ocrStatus').textContent='Fotoerkennung derzeit nicht verfügbar: '+error.message+'. Das Foto bleibt sichtbar; bitte Teamnamen im Textfeld eingeben.';}finally{$('readPhoto').disabled=false;}}
+async function recognize(){
+ if(!pendingImage){$('ocrStatus').textContent='Bitte zuerst ein Bild auswählen.';return;}
+ $('readPhoto').disabled=true;$('ocrStatus').textContent='OCR wird geladen – Internetverbindung erforderlich …';
+ try{
+  if(!window.Tesseract){await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';script.onload=resolve;script.onerror=()=>reject(Error('OCR-Bibliothek nicht geladen'));document.head.append(script);});}
+  const worker=await Tesseract.createWorker('deu+eng',1,{logger:m=>{if(m.status==='recognizing text')$('ocrStatus').textContent=`Lese Bild: ${Math.round(m.progress*100)} %`;}});
+  try{
+   let structured=null;
+   try{structured=await recognizeMeinTurnierplanScreenshot(worker,pendingImage);}catch{}
+   if(structured?.parsed?.fixtures?.length>=3){$('rawImport').value=structured.raw.slice(0,50000);if($('advancedImportText'))$('advancedImportText').open=false;$('ocrStatus').textContent=`Screenshot gelesen: ${structured.parsed.groups.A.length+structured.parsed.groups.B.length} Teams und ${structured.parsed.fixtures.length} Vorrundenspiele erkannt. Bitte alles kontrollieren.`;preview(structured.parsed,'MeinTurnierplan-Screenshot');return;}
+   await worker.setParameters({tessedit_pageseg_mode:'11'});const result=await worker.recognize(pendingImage);$('rawImport').value=result.data.text;if($('advancedImportText'))$('advancedImportText').open=true;
+   try{const parsed=parsePhotoText(result.data.text);$('ocrStatus').textContent=`${parsed.groups.A.length+parsed.groups.B.length} mögliche Teams erkannt. Bitte jeden Namen kontrollieren.`;preview(parsed,'Foto (ungeprüfte OCR)');}
+   catch(e){pendingImport=null;$('applyPreview').disabled=true;setMessage('Keine zuverlässige Gruppe erkannt. '+e.message);$('ocrStatus').textContent='Bei kompletten MeinTurnierplan-Seiten bitte einen möglichst geraden Screenshot verwenden; alternativ das offizielle PDF hochladen.';}
+  }finally{await worker.terminate();}
+ }catch(error){$('ocrStatus').textContent='Fotoerkennung derzeit nicht verfügbar: '+error.message+'. Das Foto bleibt sichtbar; bitte Teamnamen im Textfeld eingeben.';}
+ finally{$('readPhoto').disabled=false;}
+}
 async function loadPdfFile(file){
  $('ocrStatus').textContent='PDF wird gelesen … (erstmaliges Laden benötigt Internet)';
  if(!window.pdfjsLib){
@@ -372,9 +452,10 @@ $('saveUrl').onclick=async()=>{const val=$('onlineUrl').value.trim();if(val&&!va
  const url=validURL($('onlineUrl').value.trim());
  if(!url){await appAlert('Bitte einen gültigen Link eingeben.','Online-Spielplan');return;}
  if(!/\.(csv|json)$/i.test(url.pathname)){
-  const mtp=/(^|\.)meinturnierplan\.de$/i.test(url.hostname);
+  const pdfUrl=meinturnierplanPdfUrl(url),mtp=Boolean(pdfUrl);
   event().url=url.href;save();
-  setMessage(mtp?'MeinTurnierplan-Link gespeichert. Diese öffentliche HTML-Seite kann von GitHub Pages nicht direkt ausgelesen werden (Browser-Zugriff/CORS). Öffne auf MeinTurnierplan „Ansicht & Druck → Druckansicht (PDF)“, speichere das PDF und lade es oben hoch. Alternativ ein auf die Tabelle zugeschnittenes Foto verwenden. Es erfolgt kein Live-Abgleich.':'Website-Link gespeichert. Eine normale HTML-Seite ist keine CSV-/JSON-Datei. Bitte einen direkten Datei-Link verwenden oder den offiziellen Spielplan als PDF, CSV, JSON bzw. zugeschnittenes Foto hochladen.');
+  if(mtp){setMessage('MeinTurnierplan erkannt. Die HTML-Seite selbst darf von GitHub Pages nicht ausgelesen werden. Ich öffne deshalb die offizielle PDF-Druckansicht. Speichere das PDF in „Dateien“ und wähle es oben aus – daraus kann Matchday Teams, Gruppen und Begegnungen strukturiert lesen.');window.open(pdfUrl,'_blank','noopener,noreferrer');}
+  else setMessage('Website-Link gespeichert. Eine normale HTML-Seite ist keine CSV-/JSON-Datei. Bitte einen direkten Datei-Link verwenden oder den offiziellen Spielplan als PDF, CSV, JSON bzw. Foto hochladen.');
   return;
  }
  if(!await appConfirm('Öffentliche CSV-/JSON-Datei von dieser URL abrufen?','Datei importieren','Abrufen'))return;
