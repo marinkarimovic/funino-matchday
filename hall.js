@@ -142,7 +142,7 @@ function parseTournamentPdfPages(pages){
  const organizerRow=first.find(l=>/\bVeranstalter\s*:/i.test(l.text))?.text||'';
  const dm=dateRow.match(/\b(\d{2})\.(\d{2})\.(\d{4})\b/);
  const date=dm?`${dm[3]}-${dm[2]}-${dm[1]}`:'';
- const durationMatch=durationRow.match(/Spieldauer\s*:\s*(\d{1,2})\s*Minuten/i);
+ const durationMatch=durationRow.match(/Spieldauer(?:\s+in\s+Gruppenphase)?\s*:\s*(\d{1,2})\s*Minuten/i);
  const duration=durationMatch?Number(durationMatch[1]):null;
  const organizer=organizerRow.replace(/^.*?Veranstalter\s*:\s*/i,'').trim();
  const venue=venueRow.replace(/^.*?Veranstaltungsort\s*:\s*/i,'').trim();
@@ -179,8 +179,8 @@ function parseTournamentPdfPages(pages){
    if(timeIndex<0)continue;
    const time=items[timeIndex];
    const numberItems=items.slice(0,timeIndex).filter(i=>/^\d{1,3}$/.test(i.text));
-   if(numberItems.length<2)continue;
-   const number=Number(numberItems[0].text),pitch=Number(numberItems[1].text);
+   if(numberItems.length<1)continue;
+   const number=Number(numberItems[0].text),pitch=numberItems.length>=2?Number(numberItems[1].text):null;
    const gIndex=items.findIndex((item,i)=>i>timeIndex&&item.x>time.x&&/^[AB]$/i.test(item.text));
    if(gIndex<0)continue;
    const gr=items[gIndex],group=gr.text.toUpperCase();
@@ -192,7 +192,7 @@ function parseTournamentPdfPages(pages){
    const names=items.filter((item,i)=>i>gIndex&&item.x>gr.x+6&&item.x<scoreX-2);
    const home=clean(names.filter(i=>i.x<awayStart).map(i=>i.text).join(' '));
    const away=clean(names.filter(i=>i.x>=awayStart).map(i=>i.text).join(' '));
-   if(!Number.isInteger(number)||number<1||number>999||!Number.isInteger(pitch)||pitch<1||pitch>40)continue;
+   if(!Number.isInteger(number)||number<1||number>999||(pitch!==null&&(!Number.isInteger(pitch)||pitch<1||pitch>40)))continue;
    seenRows++;
    if(!home||!away||home===away||!/\p{L}/u.test(home)||!/\p{L}/u.test(away)){
     messages.push(`Spiel ${number}: Mannschaften konnten nicht getrennt gelesen werden.`);continue;
@@ -200,7 +200,7 @@ function parseTournamentPdfPages(pages){
    if(groups[group].length&&(!groups[group].includes(home)||!groups[group].includes(away))){
     messages.push(`Spiel ${number}: Begegnung passt nicht zur erkannten Gruppe ${group}.`);continue;
    }
-   const f=match(home,away,group,'group',time.text,`Feld ${pitch}`);
+   const f=match(home,away,group,'group',time.text,pitch===null?'':`Feld ${pitch}`);
    f.sourceNo=number;
    fixtures.push(f);
   }
