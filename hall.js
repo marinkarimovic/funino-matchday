@@ -83,8 +83,11 @@ function normalizeTournamentId(value){
  const raw=clean(value);
  if(/^[a-z0-9]+$/i.test(raw))return raw;
  const u=validURL(raw);
- if(u&&u.hostname==='www.meinturnierplan.de'&&/^\/pdf\.php$/i.test(u.pathname)){
-  const id=u.searchParams.get('id')||'';return /^[a-z0-9]+$/i.test(id)?id:'';
+ if(u&&u.hostname==='www.meinturnierplan.de'){
+  if(/^\/pdf\.php$/i.test(u.pathname)){
+   const id=u.searchParams.get('id')||'';return /^[a-z0-9]+$/i.test(id)?id:'';
+  }
+  if(/^\/c\/ad7xc9po\//i.test(u.pathname))return 'axy2scxq1t';
  }
  return '';
 }
