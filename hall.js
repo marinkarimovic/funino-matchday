@@ -1,4 +1,4 @@
-/* Matchday Hallenturnier v4.6 — local-first; no automatic external fetching. */
+/* Matchday Hallenturnier v4.17 — local-first with optional MeinTurnierplan sync. */
 (()=>{'use strict';
 const KEY='matchday_hall_v3';
 const SYNC_ENDPOINT='https://axvcoxhjxdyvktqbjznp.supabase.co/functions/v1/meinturnierplan-sync';
@@ -33,9 +33,24 @@ app.tournaments=app.tournaments.filter(x=>x&&x.id&&app.events[x.id]);
 if(!app.tournaments.some(x=>x.id===app.active))app.active=app.tournaments[0]?.id||'';
 for(const e of Object.values(app.events||{})){if(e&&typeof e==='object'&&(!Number.isInteger(e.duration)||e.duration<1||e.duration>90))e.duration=Math.max(1,Math.min(90,Math.round(Number(app.duration)||10)));}
 }
+function timeScoreSignatureMatch(f){
+ if(!f||!Number.isInteger(f.homeGoals)||!Number.isInteger(f.awayGoals)||(Array.isArray(f.events)&&f.events.length))return false;
+ const m=String(f.time||'').match(/^(\d{1,2}):(\d{2})$/);if(!m)return false;
+ return Number(f.homeGoals)===Number(m[1])&&Number(f.awayGoals)===Number(m[2]);
+}
+function repairCorruptedTimeScores(ev){
+ if(!ev||typeof ev!=='object')return 0;
+ const games=[...(Array.isArray(ev.fixtures)?ev.fixtures:[]),...(Array.isArray(ev.ko)?ev.ko:[])];
+ const suspicious=games.filter(timeScoreSignatureMatch);
+ if(suspicious.length<3)return 0;
+ for(const f of suspicious){f.homeGoals=null;f.awayGoals=null;f.completed=false;if(!Array.isArray(f.events))f.events=[];}
+ return suspicious.length;
+}
 migrateLegacy();
-for(const k of Object.keys(app.events)){const e=app.events[k];if(e&&typeof e==='object'){e.running=false;e.startedAt=null;}}
+let repairedOnStartup=0;
+for(const k of Object.keys(app.events)){const e=app.events[k];if(e&&typeof e==='object'){e.running=false;e.startedAt=null;repairedOnStartup+=repairCorruptedTimeScores(e);}}
 for(const e of Object.values(app.events||{})){if(e&&typeof e==='object'&&!e.syncTournamentId&&/\/c\/ad7xc9po\//i.test(String(e.url||'')))e.syncTournamentId='axy2scxq1t';}
+if(repairedOnStartup){try{localStorage.setItem(KEY,JSON.stringify(app));}catch{}}
 let event=()=>app.events[app.active]??(app.events[app.active]=freshEvent());
 function matchDuration(e=event()){const x=Number(e?.duration);return Number.isInteger(x)&&x>=1&&x<=90?x:Math.max(1,Math.min(90,Math.round(Number(app.duration)||10)));}
 let view='plan',mainView='data',editingEventId=null,pendingImport=null,pendingImage=null,importMetaSelection=false,lastTick=Date.now();
@@ -111,11 +126,7 @@ function findSyncFixture(remote){
  return fixtures.find(f=>(teamKey(f.home)===teamKey(remote.home)&&teamKey(f.away)===teamKey(remote.away))||(teamKey(f.home)===teamKey(remote.away)&&teamKey(f.away)===teamKey(remote.home)))||null;
 }
 function hasOfficialScore(remote){return Number.isInteger(remote?.homeGoals)&&Number.isInteger(remote?.awayGoals);}
-function isTimeAsScoreCorruption(local,remote){
- if(hasOfficialScore(remote)||!scoreReady(local)||Array.isArray(local.events)&&local.events.length)return false;
- const m=String(local.time||'').match(/^(\d{1,2}):(\d{2})$/);if(!m)return false;
- return Number(local.homeGoals)===Number(m[1])&&Number(local.awayGoals)===Number(m[2]);
-}
+function isTimeAsScoreCorruption(local,remote){return !hasOfficialScore(remote)&&timeScoreSignatureMatch(local);}
 async function syncOnlineTournament(){
  const ev=event(),url=validURL(ev.url);
  const tournamentId=normalizeTournamentId(ev.syncTournamentId||ev.url||'');
@@ -127,7 +138,7 @@ async function syncOnlineTournament(){
   if(!response.ok||!data?.ok)throw Error(data?.error||('HTTP '+response.status));
   if(!Array.isArray(data.fixtures)||!data.fixtures.length)throw Error('Keine Begegnungen auf der offiziellen Seite gefunden.');
 
-  let added=0,updatedMeta=0,officialResults=0,repairedResults=0;const conflicts=[];
+  let added=0,updatedMeta=0,officialResults=0,repairedResults=repairCorruptedTimeScores(ev);const conflicts=[];
   for(const remote of data.fixtures){
    if(!remote?.home||!remote?.away)continue;
    let local=findSyncFixture(remote);
