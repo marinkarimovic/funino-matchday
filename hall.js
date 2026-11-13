@@ -89,11 +89,12 @@ function normalizeTournamentId(value){
  return '';
 }
 function renderSyncStatus(){
- const ev=event(),linked=isMeinTurnierplanUrl(ev.url),tid=normalizeTournamentId(ev.syncTournamentId||'');
- if($('syncTournamentId'))$('syncTournamentId').value=ev.syncTournamentId||'';
- $('syncTournament').disabled=!(linked&&tid);
- if(!linked){$('syncStatus').textContent='Noch kein MeinTurnierplan-Link hinterlegt. Den Link unter „Import“ speichern.';return;}
- if(!tid){$('syncStatus').textContent='Turnier-Link gespeichert · echte Turnier-ID fehlt noch.';return;}
+ const ev=event();
+ const tid=normalizeTournamentId(ev.syncTournamentId||ev.url||'');
+ if(tid&&!ev.syncTournamentId){ev.syncTournamentId=tid;save();}
+ if($('syncTournamentId'))$('syncTournamentId').value=ev.syncTournamentId||tid||'';
+ $('syncTournament').disabled=!tid;
+ if(!tid){$('syncStatus').textContent='Noch keine echte MeinTurnierplan-Turnier-ID gespeichert.';return;}
  if(ev.lastSyncAt){const when=new Date(ev.lastSyncAt);$('syncStatus').textContent='ID '+tid+' · zuletzt synchronisiert '+when.toLocaleString('de-AT',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+(ev.lastSyncSummary?' · '+ev.lastSyncSummary:'');}
  else $('syncStatus').textContent='ID '+tid+' · bereit zur Synchronisierung.';
 }
@@ -108,10 +109,11 @@ function findSyncFixture(remote){
 }
 async function syncOnlineTournament(){
  const ev=event(),url=validURL(ev.url);
- if(!url||!isMeinTurnierplanUrl(url.href)){await appAlert('Bitte zuerst unter „Import“ den öffentlichen MeinTurnierplan-Link dieses Turniers speichern.','Live-Sync');return;}
+ const tournamentId=normalizeTournamentId(ev.syncTournamentId||ev.url||'');
+ if(!tournamentId){await appAlert('Bitte einmal die echte MeinTurnierplan-Turnier-ID oder den PDF-Link speichern.','Live-Sync');return;}
  const button=$('syncTournament'),oldText=button.textContent;button.disabled=true;button.textContent='↻ Synchronisiere …';$('syncStatus').textContent='MeinTurnierplan wird gelesen …';
  try{
-  const tournamentId=normalizeTournamentId(ev.syncTournamentId||'');if(!tournamentId){await appAlert('Bitte einmal die echte MeinTurnierplan-Turnier-ID oder den PDF-Link speichern.','Live-Sync');return;}const response=await fetch(SYNC_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url.href,tournamentId})});
+  const response=await fetch(SYNC_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url?.href||'',tournamentId})});
   const data=await response.json().catch(()=>({}));
   if(!response.ok||!data?.ok)throw Error(data?.error||('HTTP '+response.status));
   if(!Array.isArray(data.fixtures)||!data.fixtures.length)throw Error('Keine Begegnungen auf der offiziellen Seite gefunden.');
@@ -532,7 +534,7 @@ $('liveChoice').onchange=e=>{event().running=false;event().seconds=matchDuration
 async function importFileHandler(e){const file=e.target.files[0];if(!file)return;importMetaSelection=false;pendingImport=null;$('applyPreview').disabled=true;pendingImage=null;$('photoPreview').classList.add('hidden');$('rawImport').value='';$('ocrStatus').textContent='';if($('advancedImportText'))$('advancedImportText').open=false;try{if(file.type.startsWith('image/')||/\.(png|jpe?g|webp)$/i.test(file.name)){pendingImage=file;$('photoPreview').src=URL.createObjectURL(file);$('photoPreview').classList.remove('hidden');setMessage('Foto geladen. „Text aus Foto erkennen“ tippen oder Mannschaften manuell eintragen.');if($('advancedImportText'))$('advancedImportText').open=true;return;}if(file.type==='application/pdf'||/\.pdf$/i.test(file.name)){await loadPdfFile(file);return;}const text=await file.text();$('rawImport').value=text.slice(0,50000);const parsed=/\.json$/i.test(file.name)?parseJSON(text):parseCSV(text);preview(parsed,'Datei '+file.name);}catch(err){setMessage('Importfehler: '+err.message);}finally{e.target.value='';}}
 $('importFile').onchange=importFileHandler;$('cameraPhoto').onchange=importFileHandler;
 $('importPreview').addEventListener('change',updateImportTeam);$('importPreview').addEventListener('click',updateImportTeam);$('readPhoto').onclick=recognize;$('previewText').onclick=()=>{try{const raw=$('rawImport').value.trim();if(!raw)throw Error('Textfeld leer');let parsed;if(raw.startsWith('{'))parsed=parseJSON(raw);else if(/^\s*(gruppe|group)\s*[;,\t]/i.test(raw)||/\b(heim|home|mannschaft|team)\b\s*[;,\t]/i.test(raw.split('\n')[0]))parsed=parseCSV(raw);else parsed=parsePhotoText(raw);preview(parsed,'Textvorschau');}catch(err){pendingImport=null;$('applyPreview').disabled=true;setMessage(err.message);}};$('applyPreview').onclick=applyImport;
-$('saveUrl').onclick=async()=>{const val=$('onlineUrl').value.trim();if(val&&!validURL(val)){await appAlert('Bitte eine gültige http(s)-Adresse eingeben.','Online-Tabelle');return;}event().url=val;save();await appAlert('Link gespeichert.','Online-Tabelle');};$('openUrl').onclick=async()=>{const u=validURL($('onlineUrl').value.trim());if(!u){await appAlert('Zuerst einen gültigen Link eingeben.','Online-Tabelle');return;}window.open(u.href,'_blank','noopener,noreferrer');};$('importUrl').onclick=async()=>{
+$('saveUrl').onclick=async()=>{const val=$('onlineUrl').value.trim();if(val&&!validURL(val)){await appAlert('Bitte eine gültige http(s)-Adresse eingeben.','Online-Tabelle');return;}event().url=val;const tid=normalizeTournamentId(val);if(tid)event().syncTournamentId=tid;save();renderSyncStatus();await appAlert(tid?'Link gespeichert und Turnier-ID '+tid+' erkannt.':'Link gespeichert.','Online-Tabelle');};$('openUrl').onclick=async()=>{const u=validURL($('onlineUrl').value.trim());if(!u){await appAlert('Zuerst einen gültigen Link eingeben.','Online-Tabelle');return;}window.open(u.href,'_blank','noopener,noreferrer');};$('importUrl').onclick=async()=>{
  const url=validURL($('onlineUrl').value.trim());
  if(!url){await appAlert('Bitte einen gültigen Link eingeben.','Online-Spielplan');return;}
  if(!/\.(csv|json)$/i.test(url.pathname)){
