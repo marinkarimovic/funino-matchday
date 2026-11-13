@@ -291,7 +291,7 @@ function improveStructuredOcrNames(parsed,candidates){if(!parsed||!candidates?.l
 async function loadImageBitmapForOcr(file){if('createImageBitmap' in window)return createImageBitmap(file);return new Promise((resolve,reject)=>{const img=new Image(),url=URL.createObjectURL(file);img.onload=()=>{URL.revokeObjectURL(url);resolve(img);};img.onerror=()=>{URL.revokeObjectURL(url);reject(Error('Bild konnte nicht geöffnet werden'));};img.src=url;});}
 function ocrCropCanvas(image,left,top,right,bottom,scale=3){const sw=image.width*(right-left),sh=image.height*(bottom-top);const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(sw*scale));canvas.height=Math.max(1,Math.round(sh*scale));const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.filter='grayscale(1) contrast(1.9)';ctx.drawImage(image,image.width*left,image.height*top,sw,sh,0,0,canvas.width,canvas.height);return canvas;}
 async function recognizeMeinTurnierplanScreenshot(worker,file){const image=await loadImageBitmapForOcr(file);await worker.setParameters({tessedit_pageseg_mode:'6',preserve_interword_spaces:'1'});const metaCanvas=ocrCropCanvas(image,0.015,0.015,0.78,0.22,3);const participantCanvas=ocrCropCanvas(image,0.015,0.19,0.75,0.36,3);const scheduleCanvas=ocrCropCanvas(image,0.015,0.32,0.62,0.66,3);const metaResult=await worker.recognize(metaCanvas),participantResult=await worker.recognize(participantCanvas),scheduleResult=await worker.recognize(scheduleCanvas);const parsed=improveStructuredOcrNames(parseMeinTurnierplanScreenshotText(metaResult.data.text,scheduleResult.data.text),extractOcrParticipantCandidates(participantResult.data.text));return {parsed,raw:`${metaResult.data.text}\n\nTeilnehmer\n${participantResult.data.text}\n\nVorrunde\n${scheduleResult.data.text}`};}
-function meinturnierplanPdfUrl(url){if(!url||!/(^|\.)meinturnierplan\.de$/i.test(url.hostname))return null;const id=url.pathname.match(/^\/c\/([^/]+)/i)?.[1];return id?`https://www.meinturnierplan.de/pdf.php?id=${encodeURIComponent(id)}`:null;}
+function meinturnierplanPdfUrl(url){if(!url||!/(^|\.)meinturnierplan\.de$/i.test(url.hostname))return null;const directId=url.pathname.match(/^\/pdf\.php$/i)&&url.searchParams.get('id');if(directId)return `https://www.meinturnierplan.de/pdf.php?id=${encodeURIComponent(directId)}`;const id=url.pathname.match(/^\/c\/([^/]+)/i)?.[1];return id?`https://www.meinturnierplan.de/pdf.php?id=${encodeURIComponent(id)}`:null;}
 
 // Only rows inside identified group tables are considered team names when processing OCR.
 // Ordinary text under explicit "Gruppe A/B" headings is also supported for manual input.
@@ -410,13 +410,13 @@ async function recognize(){
  }catch(error){$('ocrStatus').textContent='Fotoerkennung derzeit nicht verfügbar: '+error.message+'. Das Foto bleibt sichtbar; bitte Teamnamen im Textfeld eingeben.';}
  finally{$('readPhoto').disabled=false;}
 }
-async function loadPdfFile(file){
+async function parsePdfBuffer(bytes,label='PDF'){
  $('ocrStatus').textContent='PDF wird gelesen … (erstmaliges Laden benötigt Internet)';
  if(!window.pdfjsLib){
   await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';script.onload=resolve;script.onerror=()=>reject(Error('PDF-Bibliothek konnte nicht geladen werden'));document.head.append(script);});
  }
  const pdf=window.pdfjsLib;pdf.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
- const bytes=await file.arrayBuffer();if(bytes.byteLength>12000000)throw Error('PDF ist zu groß (maximal 12 MB)');
+ if(bytes.byteLength>12000000)throw Error('PDF ist zu groß (maximal 12 MB)');
  const doc=await pdf.getDocument({data:new Uint8Array(bytes)}).promise;
  const pages=[];
  for(let p=1;p<=Math.min(doc.numPages,15);p++){
@@ -424,13 +424,13 @@ async function loadPdfFile(file){
   pages.push((txt.items||[]).filter(x=>x.str?.trim()).map(x=>({text:x.str,x:x.transform?.[4]??0,y:x.transform?.[5]??0})));
  }
  const result=parseTournamentPdfPages(pages);
- // Display an editable, valid JSON representation of the source PDF. A click on
- // "Vorschau analysieren" then keeps groups, official fixtures and metadata.
  $('rawImport').value=JSON.stringify({groups:result.groups,fixtures:result.fixtures.map(({id,events,homeGoals,awayGoals,completed,winner,...row})=>row),meta:result.meta},null,2).slice(0,50000);
- preview(result,'PDF '+file.name);
+ preview(result,label);
  if($('advancedImportText'))$('advancedImportText').open=false;
  $('ocrStatus').textContent=`PDF gelesen: ${result.groups.A.length+result.groups.B.length} Mannschaften und ${result.fixtures.length} Begegnungen aus ${pages.length} Seite(n). Bitte die Vorschau prüfen.`;
+ return result;
 }
+async function loadPdfFile(file){const bytes=await file.arrayBuffer();return parsePdfBuffer(bytes,'PDF '+file.name);}
 function csvQuote(v){return '"'+String(v??'').replace(/"/g,'""')+'"';}
 function exportCSV(){const ev=event();let result=['Phase;Gruppe;Heim;Gast;Tore Heim;Tore Gast;Uhrzeit;Feld;Sieger'];for(const f of [...ev.fixtures,...ev.ko])result.push([f.stage,f.group,f.home,f.away,f.homeGoals??'',f.awayGoals??'',f.time,f.field,winner(f)].map(csvQuote).join(';'));result.push('');result.push('Torschütze;Tore');const names={};for(const f of [...ev.fixtures,...ev.ko])for(const g of f.events||[])if(g.side==='ours')names[g.player]=(names[g.player]||0)+1;for(const [name,total] of Object.entries(names).sort((a,b)=>b[1]-a[1]))result.push([name,total].map(csvQuote).join(';'));download('hallenturnier-'+app.active+'.csv','\ufeff'+result.join('\r\n'),'text/csv;charset=utf-8');}
 function init(){setupDialog();$('settingsOpen').onclick=openSettings;$('settingsClose').onclick=closeSettings;$('settingsCancel').onclick=closeSettings;$('settingsSheet').onclick=e=>{if(e.target.id==='settingsSheet')closeSettings();};document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('settingsSheet').classList.contains('hidden'))closeSettings();});const prev=app.events[app.active];$('teamName').value=app.team;$('roster').value=app.roster.join('\n');$('matchLength').value=app.duration;$('groupA').value=(prev?.groups.A||[]).join('\n');$('groupB').value=(prev?.groups.B||[]).join('\n');render();
@@ -452,8 +452,22 @@ $('saveUrl').onclick=async()=>{const val=$('onlineUrl').value.trim();if(val&&!va
  const url=validURL($('onlineUrl').value.trim());
  if(!url){await appAlert('Bitte einen gültigen Link eingeben.','Online-Spielplan');return;}
  if(!/\.(csv|json)$/i.test(url.pathname)){
-  const pdfUrl=meinturnierplanPdfUrl(url),mtp=Boolean(pdfUrl);
+  const pdfUrl=meinturnierplanPdfUrl(url),mtp=Boolean(pdfUrl),directPdf=mtp&&/^\/pdf\.php$/i.test(url.pathname);
   event().url=url.href;save();
+  if(directPdf){
+   setMessage('Direkter MeinTurnierplan-PDF-Link erkannt. Ich versuche den Plan jetzt direkt einzulesen …');
+   try{
+    const response=await fetch(pdfUrl,{mode:'cors',credentials:'omit'});
+    if(!response.ok)throw Error('HTTP '+response.status);
+    const bytes=await response.arrayBuffer();
+    await parsePdfBuffer(bytes,'MeinTurnierplan PDF');
+    return;
+   }catch(err){
+    setMessage('Direkter PDF-Import wurde vom Anbieter/Browser blockiert ('+err.message+'). Ich öffne das offizielle PDF. Speichere es in „Dateien“ und wähle es anschließend oben aus.');
+    window.open(pdfUrl,'_blank','noopener,noreferrer');
+    return;
+   }
+  }
   if(mtp){setMessage('MeinTurnierplan erkannt. Die HTML-Seite selbst darf von GitHub Pages nicht ausgelesen werden. Ich öffne deshalb die offizielle PDF-Druckansicht. Speichere das PDF in „Dateien“ und wähle es oben aus – daraus kann Matchday Teams, Gruppen und Begegnungen strukturiert lesen.');window.open(pdfUrl,'_blank','noopener,noreferrer');}
   else setMessage('Website-Link gespeichert. Eine normale HTML-Seite ist keine CSV-/JSON-Datei. Bitte einen direkten Datei-Link verwenden oder den offiziellen Spielplan als PDF, CSV, JSON bzw. Foto hochladen.');
   return;
