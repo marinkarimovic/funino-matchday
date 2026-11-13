@@ -110,6 +110,12 @@ function findSyncFixture(remote){
  const exact=fixtures.find(f=>syncMatchKey(f)===syncMatchKey(remote));if(exact)return exact;
  return fixtures.find(f=>(teamKey(f.home)===teamKey(remote.home)&&teamKey(f.away)===teamKey(remote.away))||(teamKey(f.home)===teamKey(remote.away)&&teamKey(f.away)===teamKey(remote.home)))||null;
 }
+function hasOfficialScore(remote){return Number.isInteger(remote?.homeGoals)&&Number.isInteger(remote?.awayGoals);}
+function isTimeAsScoreCorruption(local,remote){
+ if(hasOfficialScore(remote)||!scoreReady(local)||Array.isArray(local.events)&&local.events.length)return false;
+ const m=String(local.time||'').match(/^(\d{1,2}):(\d{2})$/);if(!m)return false;
+ return Number(local.homeGoals)===Number(m[1])&&Number(local.awayGoals)===Number(m[2]);
+}
 async function syncOnlineTournament(){
  const ev=event(),url=validURL(ev.url);
  const tournamentId=normalizeTournamentId(ev.syncTournamentId||ev.url||'');
@@ -121,7 +127,7 @@ async function syncOnlineTournament(){
   if(!response.ok||!data?.ok)throw Error(data?.error||('HTTP '+response.status));
   if(!Array.isArray(data.fixtures)||!data.fixtures.length)throw Error('Keine Begegnungen auf der offiziellen Seite gefunden.');
 
-  let added=0,updatedMeta=0,officialResults=0;const conflicts=[];
+  let added=0,updatedMeta=0,officialResults=0,repairedResults=0;const conflicts=[];
   for(const remote of data.fixtures){
    if(!remote?.home||!remote?.away)continue;
    let local=findSyncFixture(remote);
@@ -138,7 +144,8 @@ async function syncOnlineTournament(){
    if(['A','B'].includes(remote.group)&&local.group!==remote.group){local.group=remote.group;updatedMeta++;}
    local.home=clean(remote.home);local.away=clean(remote.away);
 
-   if(Number.isInteger(remote.homeGoals)&&Number.isInteger(remote.awayGoals)){
+   if(isTimeAsScoreCorruption(local,remote)){local.homeGoals=null;local.awayGoals=null;local.completed=false;repairedResults++;}
+   if(hasOfficialScore(remote)){
     if(!scoreReady(local)){local.homeGoals=remote.homeGoals;local.awayGoals=remote.awayGoals;local.completed=Boolean(remote.completed);officialResults++;}
     else if(local.homeGoals!==remote.homeGoals||local.awayGoals!==remote.awayGoals){conflicts.push({local,remote});}
     else if(remote.completed)local.completed=true;
@@ -156,9 +163,9 @@ async function syncOnlineTournament(){
   }
 
   ev.lastSyncAt=data.syncedAt||new Date().toISOString();
-  ev.lastSyncSummary=(data.summary?.completed??officialResults)+' offizielle Ergebnisse';
+  ev.lastSyncSummary=(data.summary?.completed??officialResults)+' offizielle Ergebnisse'+(repairedResults?' · '+repairedResults+' repariert':'');
   save();render();
-  await appAlert('Synchronisierung abgeschlossen. '+(data.summary?.fixtures??data.fixtures.length)+' Begegnungen geprüft, '+added+' neu ergänzt, '+officialResults+' Ergebnisse aktualisiert'+(conflicts.length&&!conflictApplied?', '+conflicts.length+' Konflikte lokal beibehalten':'')+'.','MeinTurnierplan Live-Sync');
+  await appAlert('Synchronisierung abgeschlossen. '+(data.summary?.fixtures??data.fixtures.length)+' Begegnungen geprüft, '+added+' neu ergänzt, '+officialResults+' Ergebnisse aktualisiert'+(repairedResults?', '+repairedResults+' fehlerhafte Uhrzeit-Ergebnisse repariert':'')+(conflicts.length&&!conflictApplied?', '+conflicts.length+' Konflikte lokal beibehalten':'')+'.','MeinTurnierplan Live-Sync');
  }catch(error){
   $('syncStatus').textContent='Sync fehlgeschlagen: '+(error?.message||error);
   await appAlert('Die offizielle Turnierseite konnte nicht synchronisiert werden. '+(error?.message||error),'Live-Sync');
