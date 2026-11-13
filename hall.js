@@ -42,7 +42,8 @@ function repairCorruptedTimeScores(ev){
  if(!ev||typeof ev!=='object')return 0;
  const games=[...(Array.isArray(ev.fixtures)?ev.fixtures:[]),...(Array.isArray(ev.ko)?ev.ko:[])];
  const suspicious=games.filter(timeScoreSignatureMatch);
- if(suspicious.length<3)return 0;
+ // Repair only a clear batch-corruption signature, never a single coincidental score.
+ if(suspicious.length<3||!suspicious.some(f=>Number(f.awayGoals)>=30))return 0;
  for(const f of suspicious){f.homeGoals=null;f.awayGoals=null;f.completed=false;if(!Array.isArray(f.events))f.events=[];}
  return suspicious.length;
 }
