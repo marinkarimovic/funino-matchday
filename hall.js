@@ -1,6 +1,7 @@
 /* Matchday Hallenturnier v4.6 — local-first; no automatic external fetching. */
 (()=>{'use strict';
 const KEY='matchday_hall_v3';
+const SYNC_ENDPOINT='https://axvcoxhjxdyvktqbjznp.supabase.co/functions/v1/meinturnierplan-sync';
 const schedule=[
 ['2026-11-14','Union Babenberg · AHS Solar City','6+1'],
 ['2026-11-21','JAZ Linz Süd · Sporthalle Solar City','6+1'],
@@ -76,6 +77,77 @@ function rankings(group){const teams=event().groups[group]||[];const rows=teams.
 function renderTables(){let html='';for(const g of ['A','B']){let rows=rankings(g);if(!rows.length)continue;html+=`<h3>Gruppe ${g}</h3><div class="scroll"><table class="table"><thead><tr><th>#</th><th>Team</th><th>Sp.</th><th>S</th><th>U</th><th>N</th><th>Tore</th><th>Diff.</th><th>Pkt.</th></tr></thead><tbody>${rows.map((r,i)=>`<tr class="${r.name===app.team?'ours':''}"><td>${i+1}</td><td>${escapeHTML(r.name)}</td><td>${r.p}</td><td>${r.w}</td><td>${r.d}</td><td>${r.l}</td><td>${r.gf}:${r.ga}</td><td class="num">${r.gd>0?'+':''}${r.gd}</td><td class="num"><strong>${r.pts}</strong></td></tr>`).join('')}</tbody></table></div>`;} $('tables').innerHTML=html||'<div class="muted">Noch keine Gruppen angelegt.</div>';}
 function matchMarkup(f){const isOurs=ourMatch(f);const result=scoreReady(f)?`${f.homeGoals}:${f.awayGoals}`:'– : –';return `<div class="matchline"><div class="match"><div class="name">${escapeHTML(f.home||'Offen')}<small>${escapeHTML(f.group==='A'||f.group==='B'?'Gruppe '+f.group:f.stage==='semi'?'Halbfinale':f.stage==='final'?'Finale':'Freies Spiel')}${f.time?' · '+escapeHTML(f.time):''}</small></div><div class="score">${result}</div><div class="name">${escapeHTML(f.away||'Offen')}<small>${escapeHTML(f.field)}</small></div></div><button class="btn" data-edit="${f.id}">${isOurs?'Live':'Ergebnis'}</button>${event().fixtures.some(x=>x.id===f.id)?`<button class="btn danger" data-fixture-delete="${f.id}" aria-label="Spiel ${escapeHTML(f.home)} gegen ${escapeHTML(f.away)} löschen">✕</button>`:''}</div>`;}
 function renderFixtures(){const fixtures=[...event().fixtures,...event().ko];$('fixtures').innerHTML=fixtures.length?fixtures.map(matchMarkup).join(''):'<p>Hier erscheinen Begegnungen nach dem Import oder nach Erstellen der Gruppenrunde.</p>';}
+function isMeinTurnierplanUrl(value){const u=validURL(value);return Boolean(u&&u.protocol==='https:'&&u.hostname==='www.meinturnierplan.de'&&/^\/c\/[a-z0-9]+\/[a-z0-9-]+\/?$/i.test(u.pathname));}
+function renderSyncStatus(){
+ const ev=event(),linked=isMeinTurnierplanUrl(ev.url);
+ $('syncTournament').disabled=!linked;
+ if(!linked){$('syncStatus').textContent='Noch kein MeinTurnierplan-Link hinterlegt. Den Link unter „Import“ speichern.';return;}
+ if(ev.lastSyncAt){const when=new Date(ev.lastSyncAt);$('syncStatus').textContent='Verknüpft · zuletzt synchronisiert '+when.toLocaleString('de-AT',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+(ev.lastSyncSummary?' · '+ev.lastSyncSummary:'');}
+ else $('syncStatus').textContent='MeinTurnierplan-Link hinterlegt · bereit zur Synchronisierung.';
+}
+function syncMatchKey(f){return [f.group||'',f.time||'',teamKey(f.home),teamKey(f.away)].join('|');}
+function findSyncFixture(remote){
+ const fixtures=event().fixtures;
+ if(Number.isInteger(Number(remote.sourceNo))&&Number(remote.sourceNo)>0){
+  const byNo=fixtures.find(f=>Number(f.sourceNo)===Number(remote.sourceNo));if(byNo)return byNo;
+ }
+ const exact=fixtures.find(f=>syncMatchKey(f)===syncMatchKey(remote));if(exact)return exact;
+ return fixtures.find(f=>(teamKey(f.home)===teamKey(remote.home)&&teamKey(f.away)===teamKey(remote.away))||(teamKey(f.home)===teamKey(remote.away)&&teamKey(f.away)===teamKey(remote.home)))||null;
+}
+async function syncOnlineTournament(){
+ const ev=event(),url=validURL(ev.url);
+ if(!url||!isMeinTurnierplanUrl(url.href)){await appAlert('Bitte zuerst unter „Import“ den öffentlichen MeinTurnierplan-Link dieses Turniers speichern.','Live-Sync');return;}
+ const button=$('syncTournament'),oldText=button.textContent;button.disabled=true;button.textContent='↻ Synchronisiere …';$('syncStatus').textContent='MeinTurnierplan wird gelesen …';
+ try{
+  const response=await fetch(SYNC_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url.href})});
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok||!data?.ok)throw Error(data?.error||('HTTP '+response.status));
+  if(!Array.isArray(data.fixtures)||!data.fixtures.length)throw Error('Keine Begegnungen auf der offiziellen Seite gefunden.');
+
+  let added=0,updatedMeta=0,officialResults=0;const conflicts=[];
+  for(const remote of data.fixtures){
+   if(!remote?.home||!remote?.away)continue;
+   let local=findSyncFixture(remote);
+   if(!local){
+    local=match(clean(remote.home),clean(remote.away),['A','B'].includes(remote.group)?remote.group:'A','group',clean(remote.time),clean(remote.field));
+    if(Number.isInteger(Number(remote.sourceNo))&&Number(remote.sourceNo)>0)local.sourceNo=Number(remote.sourceNo);
+    if(Number.isInteger(remote.homeGoals)&&Number.isInteger(remote.awayGoals)){local.homeGoals=remote.homeGoals;local.awayGoals=remote.awayGoals;local.completed=Boolean(remote.completed);officialResults++;}
+    ev.fixtures.push(local);added++;continue;
+   }
+
+   if(Number.isInteger(Number(remote.sourceNo))&&Number(remote.sourceNo)>0)local.sourceNo=Number(remote.sourceNo);
+   if(remote.time&&local.time!==remote.time){local.time=clean(remote.time);updatedMeta++;}
+   if(remote.field&&local.field!==remote.field){local.field=clean(remote.field);updatedMeta++;}
+   if(['A','B'].includes(remote.group)&&local.group!==remote.group){local.group=remote.group;updatedMeta++;}
+   local.home=clean(remote.home);local.away=clean(remote.away);
+
+   if(Number.isInteger(remote.homeGoals)&&Number.isInteger(remote.awayGoals)){
+    if(!scoreReady(local)){local.homeGoals=remote.homeGoals;local.awayGoals=remote.awayGoals;local.completed=Boolean(remote.completed);officialResults++;}
+    else if(local.homeGoals!==remote.homeGoals||local.awayGoals!==remote.awayGoals){conflicts.push({local,remote});}
+    else if(remote.completed)local.completed=true;
+   }
+  }
+
+  if(Array.isArray(data.groups?.A)&&data.groups.A.length)ev.groups.A=unique(data.groups.A);
+  if(Array.isArray(data.groups?.B))ev.groups.B=unique(data.groups.B);
+  $('groupA').value=(ev.groups.A||[]).join('\n');$('groupB').value=(ev.groups.B||[]).join('\n');
+
+  let conflictApplied=0;
+  if(conflicts.length){
+   const accept=await appConfirm(conflicts.length+' offizielle Ergebnisse unterscheiden sich von lokal gespeicherten Spielständen. Offizielle Ergebnisse übernehmen? Eure Torschützen-Ereignisse bleiben erhalten.','Live-Sync: Ergebnis-Konflikt','Offizielle Ergebnisse übernehmen');
+   if(accept){for(const {local,remote} of conflicts){local.homeGoals=remote.homeGoals;local.awayGoals=remote.awayGoals;local.completed=Boolean(remote.completed);conflictApplied++;officialResults++;}}
+  }
+
+  ev.lastSyncAt=data.syncedAt||new Date().toISOString();
+  ev.lastSyncSummary=(data.summary?.completed??officialResults)+' offizielle Ergebnisse';
+  save();render();
+  await appAlert('Synchronisierung abgeschlossen. '+(data.summary?.fixtures??data.fixtures.length)+' Begegnungen geprüft, '+added+' neu ergänzt, '+officialResults+' Ergebnisse aktualisiert'+(conflicts.length&&!conflictApplied?', '+conflicts.length+' Konflikte lokal beibehalten':'')+'.','MeinTurnierplan Live-Sync');
+ }catch(error){
+  $('syncStatus').textContent='Sync fehlgeschlagen: '+(error?.message||error);
+  await appAlert('Die offizielle Turnierseite konnte nicht synchronisiert werden. '+(error?.message||error),'Live-Sync');
+ }finally{button.textContent=oldText;renderSyncStatus();}
+}
+
 function winner(f){if(!f||!scoreReady(f)||!f.home||!f.away)return '';if(f.homeGoals>f.awayGoals)return f.home;if(f.homeGoals<f.awayGoals)return f.away;return f.winner===f.home||f.winner===f.away?f.winner:'';}
 function syncFinal(){const ko=event().ko; if(ko.length!==3)return;const x=winner(ko[0]),y=winner(ko[1]);const final=ko[2];if(final.home!==x||final.away!==y){final.home=x;final.away=y;final.homeGoals=null;final.awayGoals=null;final.events=[];final.winner='';if(event().liveId===final.id){event().running=false;event().liveId=null;}}}
 function renderKO(){syncFinal();const ko=event().ko;if(ko.length!==3){$('bracket').innerHTML='<p>Halbfinale noch nicht angelegt. Gruppenstände oder manuelle Team-Auswahl verwenden.</p>';return;}
@@ -111,7 +183,7 @@ async function deleteFixture(id){
 async function editScore(id){const f=getMatch(id);if(!f)return;if(ourMatch(f)&&f.id!==event().liveId){event().running=false;event().liveId=f.id;event().seconds=matchDuration()*60;}const values=await appForm({title:'Ergebnis eintragen',message:`${f.home||'Offen'} gegen ${f.away||'Offen'}`,fields:[{name:'home',label:`${f.home||'Offen'}: Tore`,type:'number',min:0,max:99,step:1,value:f.homeGoals??'',placeholder:'leer = nicht gespielt'},{name:'away',label:`${f.away||'Offen'}: Tore`,type:'number',min:0,max:99,step:1,value:f.awayGoals??'',placeholder:'leer = nicht gespielt'}],okLabel:'Übernehmen'});if(values===null)return;const h=String(values.home).trim(),a=String(values.away).trim();if((h!==''&&!/^\d{1,2}$/.test(h))||(a!==''&&!/^\d{1,2}$/.test(a))){await appAlert('Bitte 0 bis 99 oder beide Felder leer eingeben.','Ergebnis eintragen');return;}if((h==='')!==(a==='')){await appAlert('Beide Werte eingeben oder beide leer lassen.','Ergebnis eintragen');return;}f.homeGoals=h===''?null:Number(h);f.awayGoals=a===''?null:Number(a);f.events=[];f.winner='';if(scoreReady(f)&&f.homeGoals===f.awayGoals&&f.stage!=='group'){const winnerChoice=await appForm({title:'Sieger festlegen',message:'Unentschieden nach regulärer Zeit – wer gewann im Entscheidungsschießen?',fields:[{name:'winner',label:'Sieger',type:'select',value:'',options:[{label:'Noch offen',value:''},{label:f.home,value:'1'},{label:f.away,value:'2'}]}],okLabel:'Übernehmen'});if(winnerChoice?.winner==='1')f.winner=f.home;else if(winnerChoice?.winner==='2')f.winner=f.away;}afterScore();}
 function renderStats(){const fs=[...event().fixtures,...event().ko].filter(ourMatch).filter(scoreReady),wins=fs.filter(f=>scoreOwn(f)>scoreOpp(f)).length,draws=fs.filter(f=>scoreOwn(f)===scoreOpp(f)).length,losses=fs.filter(f=>scoreOwn(f)<scoreOpp(f)).length,goals=fs.reduce((n,f)=>n+scoreOwn(f),0),conceded=fs.reduce((n,f)=>n+scoreOpp(f),0);
 $('stats').innerHTML=[['Spiele',fs.length],['Siege',wins],['Remis',draws],['Niederlagen',losses],['Tore',goals],['Gegentore',conceded]].map(([l,v])=>`<div class="statbox"><b>${v}</b><small>${l}</small></div>`).join('');const names={};for(const f of [...event().fixtures,...event().ko].filter(ourMatch))for(const g of f.events||[])if(g.side==='ours')names[g.player]=(names[g.player]||0)+1;const sorted=Object.entries(names).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0],'de'));$('scorers').innerHTML=sorted.length?sorted.map(([n,c],i)=>`<div class="match"><span>${i+1}. ${escapeHTML(n)}</span><span class="pill">${c} ⚽</span><span></span></div>`).join(''):'<p class="muted">Noch keine Torschützen erfasst.</p>';}
-function render(){renderEvents();const ready=Boolean(app.active);$('workspace').classList.toggle('hidden',!ready);$('emptyView').classList.toggle('hidden',ready);if(!ready){$('liveContent').innerHTML='';save();return;}renderGuide();renderTables();renderFixtures();renderKO();renderStats();renderLive();$('onlineUrl').value=event().url||'';save();}
+function render(){renderEvents();const ready=Boolean(app.active);$('workspace').classList.toggle('hidden',!ready);$('emptyView').classList.toggle('hidden',ready);if(!ready){$('liveContent').innerHTML='';save();return;}renderGuide();renderTables();renderFixtures();renderSyncStatus();renderKO();renderStats();renderLive();$('onlineUrl').value=event().url||'';save();}
 function teamsForKO(){const a=rankings('A').map(x=>x.name),b=rankings('B').map(x=>x.name);if(a.length>=2&&b.length>=2)return [a[0],b[1],b[0],a[1]];if(a.length>=4&&!b.length)return [a[0],a[3],a[1],a[2]];return null;}
 async function groupMake(){const e=event();const groups={A:parseLines($('groupA').value),B:parseLines($('groupB').value)};if(!groups.A.length&&!groups.B.length){await appAlert('Bitte mindestens eine Mannschaft erfassen.','Gruppenphase');return false;}if(new Set([...groups.A,...groups.B]).size!==groups.A.length+groups.B.length){await appAlert('Ein Team darf nicht in beiden Gruppen vorkommen.','Gruppenphase');return false;}e.groups=groups;save();render();return true;}
 async function generate(){if(!await groupMake())return;const e=event();const old=e.fixtures.filter(f=>f.stage==='group');if(old.length&&!await appConfirm('Vorhandene Gruppenspiele und Ergebnisse ersetzen?','Gruppenspiele erzeugen','Ersetzen'))return;
@@ -443,7 +515,7 @@ $('setupGuide').onclick=e=>{const jump=e.target.closest('[data-jump]');if(!jump)
 $('quickStartButton').onclick=async()=>{if(!app.active)return;const opp=clean($('quickOpponent').value);if(!opp||teamKey(opp)===teamKey(app.team)){await appAlert('Bitte einen gültigen Gegnernamen eingeben.','Live-Match');return;}const f=match(app.team,opp,'','friendly');event().fixtures.push(f);event().liveId=f.id;event().running=false;event().seconds=matchDuration()*60;$('quickOpponent').value='';save();renderLive();render();};
 $('saveTeam').onclick=async()=>{const previousTeam=app.team;const defaultLength=Math.round(Number($('matchLength').value));if(!Number.isInteger(defaultLength)||defaultLength<1||defaultLength>90){await appAlert('Die Standard-Spielzeit muss zwischen 1 und 90 Minuten liegen.','Setup');return;}const active=Boolean(app.active&&app.tournaments.some(x=>x.id===app.active));const eventLength=active?Math.round(Number($('eventDuration').value)):null;if(active&&(!Number.isInteger(eventLength)||eventLength<1||eventLength>90)){await appAlert('Die Turnier-Spielzeit muss zwischen 1 und 90 Minuten liegen.','Setup');return;}app.team=clean($('teamName').value)||'Unsere Kids';app.roster=parseLines($('roster').value).slice(0,40);app.duration=defaultLength;if(active){const ev=event(),before=matchDuration(ev);ev.duration=eventLength;if(!ev.running&&ev.seconds===before*60)ev.seconds=eventLength*60;}save();closeSettings();render();if(previousTeam!==app.team){await appAlert('Teamname geändert. Bereits erfasste Begegnungen werden nicht automatisch umbenannt. Bitte prüfe die Namen deiner bisherigen Spiele.','Teamname geändert');}};
 $('saveGroups').onclick=()=>groupMake();$('generateGroups').onclick=()=>generate();$('buildKO').onclick=()=>createKO();$('clearKO').onclick=async()=>{if(event().ko.length&&await appConfirm('Finalrunde und ihre Ergebnisse löschen?','Finalrunde entfernen','Löschen')){event().ko=[];event().liveId=null;render();}};
-$('addFixture').onclick=()=>addFixture();$('fixtures').onclick=e=>{const del=e.target.closest('[data-fixture-delete]');if(del){deleteFixture(del.dataset.fixtureDelete);return;}const b=e.target.closest('[data-edit]');if(!b)return;const f=getMatch(b.dataset.edit);if(ourMatch(f)){event().liveId=f.id;event().running=false;event().seconds=matchDuration()*60;showTab('live');}else editScore(f.id);};$('bracket').onclick=e=>{const b=e.target.closest('[data-edit]');if(b)editScore(b.dataset.edit);};
+$('addFixture').onclick=()=>addFixture();$('syncTournament').onclick=syncOnlineTournament;$('fixtures').onclick=e=>{const del=e.target.closest('[data-fixture-delete]');if(del){deleteFixture(del.dataset.fixtureDelete);return;}const b=e.target.closest('[data-edit]');if(!b)return;const f=getMatch(b.dataset.edit);if(ourMatch(f)){event().liveId=f.id;event().running=false;event().seconds=matchDuration()*60;showTab('live');}else editScore(f.id);};$('bracket').onclick=e=>{const b=e.target.closest('[data-edit]');if(b)editScore(b.dataset.edit);};
 $('liveChoice').onchange=e=>{event().running=false;event().seconds=matchDuration()*60;event().liveId=e.target.value;renderLive();save();};
 async function importFileHandler(e){const file=e.target.files[0];if(!file)return;importMetaSelection=false;pendingImport=null;$('applyPreview').disabled=true;pendingImage=null;$('photoPreview').classList.add('hidden');$('rawImport').value='';$('ocrStatus').textContent='';if($('advancedImportText'))$('advancedImportText').open=false;try{if(file.type.startsWith('image/')||/\.(png|jpe?g|webp)$/i.test(file.name)){pendingImage=file;$('photoPreview').src=URL.createObjectURL(file);$('photoPreview').classList.remove('hidden');setMessage('Foto geladen. „Text aus Foto erkennen“ tippen oder Mannschaften manuell eintragen.');if($('advancedImportText'))$('advancedImportText').open=true;return;}if(file.type==='application/pdf'||/\.pdf$/i.test(file.name)){await loadPdfFile(file);return;}const text=await file.text();$('rawImport').value=text.slice(0,50000);const parsed=/\.json$/i.test(file.name)?parseJSON(text):parseCSV(text);preview(parsed,'Datei '+file.name);}catch(err){setMessage('Importfehler: '+err.message);}finally{e.target.value='';}}
 $('importFile').onchange=importFileHandler;$('cameraPhoto').onchange=importFileHandler;
