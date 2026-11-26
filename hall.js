@@ -1,4 +1,4 @@
-/* Matchday Hallenturnier v4.17 — local-first with optional MeinTurnierplan sync. */
+/* Matchday Hallenturnier v4.19 — local-first with optional MeinTurnierplan sync. */
 (()=>{'use strict';
 const KEY='matchday_hall_v3';
 const SYNC_ENDPOINT='https://axvcoxhjxdyvktqbjznp.supabase.co/functions/v1/meinturnierplan-sync';
@@ -454,7 +454,7 @@ function preview(parsed,source){
   return `<div class="import-group"><h3>Gruppe ${group} · ${teams.length} Teams</h3>${teams.map((team,i)=>`<div class="import-team-row"><input aria-label="Team ${i+1} in Gruppe ${group}" data-team-group="${group}" data-team-index="${i}" value="${escapeHTML(team)}" maxlength="90"/><button class="btn danger" type="button" data-remove-team="${group}:${i}" aria-label="${escapeHTML(team)} entfernen">✕</button></div>`).join('')}</div>`;
  }).join('');
  const meta=parsed.meta||{};
- const metaFields=[meta.title,meta.date?meta.date.split('-').reverse().join('.'):null,meta.duration?meta.duration+' Minuten':null].filter(Boolean);
+ const metaFields=[meta.title,meta.date?meta.date.split('-').reverse().join('.'):null,meta.duration?meta.duration+' Minuten':null,meta.team?'Team: '+meta.team:null,Array.isArray(meta.roster)&&meta.roster.length?'Kader: '+meta.roster.length:null].filter(Boolean);
  const metaHTML=(isPDF||isStructuredOCR)?`<div class="import-summary"><strong>${isPDF?'📄 Offizieller PDF-Spielplan erkannt':'📸 Strukturierter Screenshot erkannt'}</strong><div>${escapeHTML(metaFields.join(' · '))}</div><div>${parsed.groups.A.length} Teams in Gruppe A · ${parsed.groups.B.length} Teams in Gruppe B · ${count} Begegnungen</div><label class="import-metadata-option"><input id="importMetadata" type="checkbox" ${importMetaSelection?'checked':''}/> <span>Auch Turniername, Datum, Ort und Spielzeit aus ${isPDF?'dem PDF':'dem Screenshot'} übernehmen</span></label><p class="hint">Standardmäßig bleiben deine vorhandenen Turnierdaten unverändert. Aktiviere die Option nur, wenn die Quelle zum ausgewählten Turnier gehört.</p></div>`:'';
  const warnings=(meta.notes||[]).length?`<div class="import-warning">⚠️ ${escapeHTML(meta.notes.join(' · '))}. Bitte die fehlenden Spiele manuell ergänzen.</div>`:'';
  const matches=count?`<details class="import-fixtures"><summary>📋 Alle ${count} erkannten Begegnungen prüfen</summary><div class="import-fixture-list">${parsed.fixtures.map((f,i)=>`<div class="import-fixture"><span class="import-fixture-meta">#${f.sourceNo||i+1} · ${escapeHTML(f.time||'Zeit offen')} · ${escapeHTML(f.field||'Feld offen')} · Gr. ${escapeHTML(f.group||'–')}</span><span>${escapeHTML(f.home)} <b>–</b> ${escapeHTML(f.away)}</span></div>`).join('')}</div></details>`:'<p class="hint">0 Paarungen erkannt. Gruppenteams allein ergeben noch keinen offiziellen Spielplan.</p>';
@@ -494,8 +494,15 @@ async function applyImport(){
  event().groups={...pendingImport.groups};event().fixtures=pendingImport.fixtures;
  if(pdfMeta){
   const selected=app.tournaments.find(t=>t.id===app.active);
-  if(selected){if(pdfMeta.title)selected.title=clean(pdfMeta.title);if(pdfMeta.date)selected.date=pdfMeta.date;if(pdfMeta.venue)selected.venue=clean(pdfMeta.venue);}
+  if(selected){
+   if(pdfMeta.title)selected.title=clean(pdfMeta.title);
+   if(pdfMeta.date)selected.date=pdfMeta.date;
+   if(pdfMeta.venue)selected.venue=clean(pdfMeta.venue);
+   if(pdfMeta.format)selected.format=clean(pdfMeta.format);
+  }
   if(Number.isInteger(pdfMeta.duration)&&pdfMeta.duration>=1&&pdfMeta.duration<=90){event().duration=pdfMeta.duration;event().seconds=pdfMeta.duration*60;}
+  if(pdfMeta.team)app.team=clean(pdfMeta.team);
+  if(Array.isArray(pdfMeta.roster)){const importedRoster=unique(pdfMeta.roster);if(importedRoster.length)app.roster=importedRoster;}
  }
  $('groupA').value=event().groups.A.join('\n');$('groupB').value=event().groups.B.join('\n');
  event().liveId=null;event().running=false;pendingImport=null;importMetaSelection=false;$('applyPreview').disabled=true;
